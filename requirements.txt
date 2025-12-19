@@ -1,0 +1,27 @@
+# 聲學測試 AI 分析系統 - 依賴套件清單
+# 版本日期: 2025-12-19
+
+# 核心數值運算
+numpy>=2.3.0
+scipy>=1.16.0
+
+# 音訊處理
+librosa>=0.11.0
+
+# 視覺化
+matplotlib>=3.10.0
+plotly>=6.5.0
+
+# Web 框架 (API)
+fastapi>=0.121.0
+uvicorn>=0.38.0
+python-multipart>=0.0.18
+
+# Web UI
+streamlit>=1.51.0
+
+# 資料驗證
+pydantic>=2.12.0
+
+# 音檔處理 (librosa 依賴)
+soundfile>=0.13.0
