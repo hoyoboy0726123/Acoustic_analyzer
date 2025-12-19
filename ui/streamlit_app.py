@@ -26,6 +26,16 @@ def main():
         page_icon="🔊",
         layout="wide"
     )
+    
+    # 初始化 session_state
+    if 'audio_loaded' not in st.session_state:
+        st.session_state.audio_loaded = False
+    if 'audio_original' not in st.session_state:
+        st.session_state.audio_original = None
+    if 'sr' not in st.session_state:
+        st.session_state.sr = None
+    if 'validation' not in st.session_state:
+        st.session_state.validation = None
 
     st.title("🔊 聲學測試 AI 分析系統")
     st.markdown("*基於 AI 的筆記型電腦聲學測試分析系統*")
@@ -57,11 +67,11 @@ def main():
             st.subheader("🎚️ 頻帶過濾模擬")
             st.caption("選擇要移除的頻帶，模擬去除特定噪音來源的效果")
             
-            remove_low = st.checkbox("移除低頻 (20-500Hz) - 風扇/馬達", value=False)
-            remove_mid = st.checkbox("移除中頻 (500-2kHz) - 機械運轉", value=False)
-            remove_mid_high = st.checkbox("移除中高頻 (2-6kHz) - 鍵盤聲", value=False)
-            remove_high = st.checkbox("移除高頻 (6-12kHz) - 電感嘯叫", value=False)
-            remove_ultra = st.checkbox("移除超高頻 (12-20kHz)", value=False)
+            remove_low = st.checkbox("移除低頻 (20-500Hz) - 風扇/馬達", value=False, key="rm_low")
+            remove_mid = st.checkbox("移除中頻 (500-2kHz) - 機械運轉", value=False, key="rm_mid")
+            remove_mid_high = st.checkbox("移除中高頻 (2-6kHz) - 鍵盤聲", value=False, key="rm_mid_high")
+            remove_high = st.checkbox("移除高頻 (6-12kHz) - 電感嘯叫", value=False, key="rm_high")
+            remove_ultra = st.checkbox("移除超高頻 (12-20kHz)", value=False, key="rm_ultra")
             
             if remove_low:
                 removed_bands.append("low_freq")
@@ -89,10 +99,13 @@ def main():
     if uploaded_file is not None:
         st.success(f"✅ 已上傳: **{uploaded_file.name}** ({uploaded_file.size / 1024 / 1024:.2f} MB)")
         
-        # 開始分析按鈕
+        # 開始分析按鈕 - 只載入音檔一次
         if st.button("🚀 開始分析", type="primary", use_container_width=True):
-            run_analysis(
-                uploaded_file,
+            load_audio_file(uploaded_file)
+        
+        # 如果音檔已載入，根據側邊欄設定即時顯示分析結果
+        if st.session_state.audio_loaded:
+            render_analysis_results(
                 highpass_cutoff,
                 analyze_noise,
                 analyze_spectrum,
@@ -102,6 +115,10 @@ def main():
                 removed_bands
             )
     else:
+        # 清除已載入的音檔
+        st.session_state.audio_loaded = False
+        st.session_state.audio_original = None
+        
         st.info("👆 請上傳音檔以開始分析")
         
         # 顯示支援的規格
@@ -118,28 +135,20 @@ def main():
             """)
 
 
-def run_analysis(uploaded_file, highpass_cutoff, analyze_noise, 
-                 analyze_spectrum, analyze_discrete_tone, analyze_high_freq,
-                 analyze_band_filter=False, removed_bands=None):
-    """執行音檔分析"""
-    
-    if removed_bands is None:
-        removed_bands = []
-    
-    # 建立臨時檔案
-    with tempfile.NamedTemporaryFile(
-        suffix=f".{uploaded_file.name.split('.')[-1]}",
-        delete=False
-    ) as tmp_file:
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_path = tmp_file.name
-
-    try:
-        with st.spinner("正在載入並驗證音檔..."):
-            from core.audio_loader import load_audio, validate_audio, get_audio_metadata
-            from core.filters import bandpass_filter
-            import numpy as np
-            
+def load_audio_file(uploaded_file):
+    """載入音檔到 session_state"""
+    with st.spinner("🔄 正在載入並驗證音檔..."):
+        from core.audio_loader import load_audio, validate_audio
+        
+        # 建立臨時檔案
+        with tempfile.NamedTemporaryFile(
+            suffix=f".{uploaded_file.name.split('.')[-1]}",
+            delete=False
+        ) as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        try:
             # 驗證音檔
             validation = validate_audio(tmp_path, strict=False)
             
@@ -147,51 +156,66 @@ def run_analysis(uploaded_file, highpass_cutoff, analyze_noise,
                 st.error(f"❌ 音檔驗證失敗: {validation['error_message']}")
                 return
             
-            # 載入原始音檔
-            audio_original, sr = load_audio(tmp_path)
+            # 載入音檔
+            audio, sr = load_audio(tmp_path)
             
-            # === 即時頻帶過濾 ===
-            # 如果有選擇移除的頻帶，則在分析前先套用過濾
-            if analyze_band_filter and removed_bands:
-                audio = apply_band_filter(audio_original, sr, removed_bands)
-                st.info(f"🎚️ **頻帶過濾已啟用**: 已移除 {len(removed_bands)} 個頻帶，以下所有分析基於過濾後的音訊")
-            else:
-                audio = audio_original
+            # 保存到 session_state
+            st.session_state.audio_original = audio
+            st.session_state.sr = sr
+            st.session_state.validation = validation
+            st.session_state.audio_loaded = True
             
-            # 顯示音檔資訊
-            display_audio_info(validation)
+            st.rerun()  # 重新運行以顯示分析結果
+            
+        finally:
+            # 清理臨時檔案
+            os.unlink(tmp_path)
 
-        # 執行各項分析 (使用過濾後的音訊)
-        if analyze_noise:
-            with st.spinner("計算噪音等級..."):
-                run_noise_analysis(audio, sr)
 
-        if analyze_spectrum:
-            with st.spinner("執行 FFT 頻譜分析..."):
-                run_spectrum_analysis(audio, sr)
+def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum, 
+                            analyze_discrete_tone, analyze_high_freq, 
+                            analyze_band_filter, removed_bands):
+    """根據側邊欄設定即時渲染分析結果"""
+    import numpy as np
+    
+    # 從 session_state 取得音訊資料
+    audio_original = st.session_state.audio_original
+    sr = st.session_state.sr
+    validation = st.session_state.validation
+    
+    if audio_original is None:
+        return
+    
+    # 套用頻帶過濾 (如果啟用)
+    if analyze_band_filter and removed_bands:
+        with st.spinner("🎚️ 套用頻帶過濾..."):
+            audio = apply_band_filter(audio_original, sr, removed_bands)
+            st.info(f"🎚️ **頻帶過濾已啟用**: 已移除 {len(removed_bands)} 個頻帶，以下所有分析基於過濾後的音訊")
+    else:
+        audio = audio_original
+    
+    # 顯示音檔資訊
+    display_audio_info(validation)
+    
+    # 執行各項分析 (使用過濾後的音訊)
+    if analyze_noise:
+        run_noise_analysis(audio, sr)
 
-        if analyze_discrete_tone:
-            with st.spinner("檢測 Discrete Tone..."):
-                run_discrete_tone_analysis(audio, sr)
+    if analyze_spectrum:
+        run_spectrum_analysis(audio, sr)
 
-        if analyze_high_freq:
-            with st.spinner("執行高頻音隔離分析..."):
-                run_high_freq_analysis(audio, sr, highpass_cutoff)
+    if analyze_discrete_tone:
+        run_discrete_tone_analysis(audio, sr)
 
-        # 如果有頻帶過濾，顯示原始 vs 過濾後對比
-        if analyze_band_filter and removed_bands:
-            with st.spinner("顯示頻帶過濾效果..."):
-                run_band_filter_comparison(audio_original, audio, sr, removed_bands)
+    if analyze_high_freq:
+        run_high_freq_analysis(audio, sr, highpass_cutoff)
 
-        st.success("✅ 分析完成！")
+    # 如果有頻帶過濾，顯示原始 vs 過濾後對比
+    if analyze_band_filter and removed_bands:
+        run_band_filter_comparison(audio_original, audio, sr, removed_bands)
 
-    except Exception as e:
-        st.error(f"❌ 分析過程發生錯誤: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
-    finally:
-        # 清理臨時檔案
-        os.unlink(tmp_path)
+    st.success("✅ 分析完成！側邊欄調整設定會即時更新圖表。")
+
 
 
 def display_audio_info(validation: dict):
