@@ -20,7 +20,8 @@ def create_interactive_spectrum(
     title: str = "頻譜圖",
     log_scale: bool = True,
     freq_range: Tuple[float, float] = None,
-    show_grid: bool = True
+    show_grid: bool = True,
+    ylabel: str = "幅度 (dB)"
 ) -> go.Figure:
     """建立互動式頻譜圖
 
@@ -31,6 +32,7 @@ def create_interactive_spectrum(
         log_scale: 是否使用對數頻率軸
         freq_range: 顯示的頻率範圍
         show_grid: 是否顯示網格
+        ylabel: Y 軸標籤
 
     Returns:
         go.Figure: Plotly 圖表物件
@@ -69,7 +71,7 @@ def create_interactive_spectrum(
             spikedash='dot'
         ),
         yaxis=dict(
-            title='幅度 (dB)',
+            title=ylabel,
             showgrid=show_grid,
             gridcolor='rgba(128, 128, 128, 0.3)',
             showspikes=True,

@@ -29,6 +29,60 @@ from app.config import config
 EPSILON = 1e-10  # 避免 log(0) 的極小值
 
 
+def a_weighting(frequencies: np.ndarray) -> np.ndarray:
+    """計算 A-weighting 加權係數
+    
+    根據 IEC 61672-1 標準計算 A-weighting 曲線，模擬人耳對不同頻率的敏感度。
+    
+    A-weighting 公式:
+    Ra(f) = 12194² × f⁴ / ((f² + 20.6²) × sqrt((f² + 107.7²)(f² + 737.9²)) × (f² + 12194²))
+    A(f) = 20 × log10(Ra(f)) + 2.0 dB
+    
+    Args:
+        frequencies: 頻率陣列 (Hz)
+        
+    Returns:
+        np.ndarray: A-weighting 加權值 (dB)
+    """
+    f = np.asarray(frequencies, dtype=float)
+    
+    # 避免除以零
+    f = np.maximum(f, EPSILON)
+    
+    # IEC 61672-1 A-weighting 係數
+    f2 = f ** 2
+    
+    # A-weighting 計算
+    numerator = 12194.0 ** 2 * f2 ** 2
+    denominator = ((f2 + 20.6 ** 2) * 
+                   np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * 
+                   (f2 + 12194.0 ** 2))
+    
+    ra = numerator / denominator
+    
+    # 轉為 dB 並加上校正值
+    a_weight_db = 20 * np.log10(ra + EPSILON) + 2.0
+    
+    return a_weight_db
+
+
+def apply_a_weighting(
+    frequencies: np.ndarray, 
+    magnitudes_db: np.ndarray
+) -> np.ndarray:
+    """將 A-weighting 加權套用到頻譜數據
+    
+    Args:
+        frequencies: 頻率陣列 (Hz)
+        magnitudes_db: 頻譜幅度 (dB)
+        
+    Returns:
+        np.ndarray: 加權後的頻譜幅度 (dB(A))
+    """
+    a_weight = a_weighting(frequencies)
+    return magnitudes_db + a_weight
+
+
 def compute_fft(
     audio: np.ndarray,
     sample_rate: int,

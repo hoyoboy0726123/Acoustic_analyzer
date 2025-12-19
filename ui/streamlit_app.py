@@ -56,6 +56,14 @@ def main():
         st.subheader("📋 分析選項")
         analyze_noise = st.checkbox("噪音等級分析 dB(A)", value=True)
         analyze_spectrum = st.checkbox("FFT 頻譜分析", value=True)
+        
+        # A-weighting 選項 (預設啟用)
+        use_a_weighting = st.checkbox(
+            "👂 套用 A-weighting 加權", 
+            value=True,
+            help="A-weighting 模擬人耳對不同頻率的敏感度，符合 IEC 61672-1 標準"
+        )
+        
         analyze_discrete_tone = st.checkbox("Discrete Tone 檢測", value=True)
         analyze_high_freq = st.checkbox("高頻音隔離分析", value=True)
         analyze_band_filter = st.checkbox("🎚️ 頻帶過濾模擬", value=False)
@@ -112,7 +120,8 @@ def main():
                 analyze_discrete_tone,
                 analyze_high_freq,
                 analyze_band_filter,
-                removed_bands
+                removed_bands,
+                use_a_weighting
             )
     else:
         # 清除已載入的音檔
@@ -174,9 +183,11 @@ def load_audio_file(uploaded_file):
 
 def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum, 
                             analyze_discrete_tone, analyze_high_freq, 
-                            analyze_band_filter, removed_bands):
+                            analyze_band_filter, removed_bands, use_a_weighting=True):
     """根據側邊欄設定即時渲染分析結果"""
     import numpy as np
+    import io
+    import soundfile as sf
     
     # 從 session_state 取得音訊資料
     audio_original = st.session_state.audio_original
@@ -194,15 +205,37 @@ def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum,
     else:
         audio = audio_original
     
+    # 顯示加權模式
+    if use_a_weighting:
+        st.info("👂 **A-weighting 已啟用**: 所有頻譜數據已套用 A-weighting 加權，模擬人耳感知")
+    
     # 顯示音檔資訊
     display_audio_info(validation)
     
-    # 執行各項分析 (使用過濾後的音訊)
+    # === 同步音訊播放器 (帶 Spectrogram 進度線) ===
+    from ui.audio_player import create_audio_player_with_spectrogram, create_simple_audio_player
+    
+    if analyze_band_filter and removed_bands:
+        # 有頻帶過濾時顯示兩個播放器
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("🎧 **過濾後音訊** (基於此進行分析)")
+            create_audio_player_with_spectrogram(audio, sr, "🎵 過濾後音訊播放器")
+        with col2:
+            st.caption("🔊 **原始音訊** (對照參考)")
+            create_audio_player_with_spectrogram(audio_original, sr, "🔊 原始音訊播放器")
+    else:
+        # 只顯示一個播放器
+        create_audio_player_with_spectrogram(audio, sr, "🎵 音訊播放器 (點擊頻譜圖可跳轉)")
+    
+    st.markdown("---")
+    
+    # 執行各項分析 (使用過濾後的音訊，傳入 A-weighting 設定)
     if analyze_noise:
         run_noise_analysis(audio, sr)
 
     if analyze_spectrum:
-        run_spectrum_analysis(audio, sr)
+        run_spectrum_analysis(audio, sr, use_a_weighting)
 
     if analyze_discrete_tone:
         run_discrete_tone_analysis(audio, sr)
@@ -262,9 +295,15 @@ def run_noise_analysis(audio, sr):
     st.markdown("---")
 
 
-def run_spectrum_analysis(audio, sr):
-    """執行頻譜分析 - 多種圖表即時切換"""
-    from core.fft import compute_average_spectrum
+def run_spectrum_analysis(audio, sr, use_a_weighting=True):
+    """執行頻譜分析 - 多種圖表即時切換
+    
+    Args:
+        audio: 音訊資料
+        sr: 取樣率
+        use_a_weighting: 是否套用 A-weighting 加權
+    """
+    from core.fft import compute_average_spectrum, apply_a_weighting
     from utils.interactive_plots import (
         create_interactive_spectrum,
         create_waveform_chart,
@@ -279,22 +318,30 @@ def run_spectrum_analysis(audio, sr):
     # 計算頻譜 (只需計算一次)
     frequencies, magnitudes_db = compute_average_spectrum(audio, sr)
     
+    # 套用 A-weighting (如果啟用)
+    if use_a_weighting:
+        magnitudes_db = apply_a_weighting(frequencies, magnitudes_db)
+        weight_label = "dB(A)"
+    else:
+        weight_label = "dB"
+    
     # 將結果存入 session_state 供圖表切換使用
     st.session_state['audio'] = audio
     st.session_state['sr'] = sr
     st.session_state['frequencies'] = frequencies
     st.session_state['magnitudes_db'] = magnitudes_db
+    st.session_state['use_a_weighting'] = use_a_weighting
     
-    st.subheader("📈 頻譜分析 (多種視圖)")
+    st.subheader(f"📈 頻譜分析 (多種視圖) - {weight_label}")
     st.caption("💡 提示: 切換不同圖表類型即時顯示，支援滑鼠縮放、平移、十字座標")
     
     # 使用 tabs 實現即時切換
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "📊 FFT 頻譜", 
+        f"📊 FFT 頻譜 ({weight_label})", 
         "🌊 波形圖", 
         "🔥 Spectrogram", 
-        "👂 A-weighting", 
-        "📶 1/3 倍頻程",
+        "👂 A-weighting 曲線", 
+        f"📶 1/3 倍頻程 ({weight_label})",
         "🌀 3D Waterfall",
         "📋 綜合視圖"
     ])
@@ -302,7 +349,8 @@ def run_spectrum_analysis(audio, sr):
     with tab1:
         spectrum_fig = create_interactive_spectrum(
             frequencies, magnitudes_db,
-            title="FFT 平均頻譜圖"
+            title=f"FFT 平均頻譜圖 ({weight_label})",
+            ylabel=f"幅度 ({weight_label})"
         )
         st.plotly_chart(spectrum_fig, use_container_width=True, key="fft_spectrum")
     
@@ -317,7 +365,7 @@ def run_spectrum_analysis(audio, sr):
     with tab4:
         a_weight_fig = create_a_weighting_chart(sr)
         st.plotly_chart(a_weight_fig, use_container_width=True, key="a_weight")
-        st.info("💡 A-weighting 曲線顯示人耳對不同頻率的敏感度。低頻和超高頻會被衰減，2-5kHz 區域（人耳最敏感）則接近 0 dB。")
+        st.info("💡 此曲線顯示 A-weighting 的頻率響應。當 '套用 A-weighting 加權' 啟用時，此曲線已套用到所有頻譜數據。")
     
     with tab5:
         octave_fig = create_octave_band_chart(audio, sr)
