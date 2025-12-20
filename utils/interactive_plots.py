@@ -12,6 +12,7 @@ from typing import Tuple, List, Optional
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from core.band_analyzer import compute_octave_bands
 
 
 def create_interactive_spectrum(
@@ -964,92 +965,203 @@ def create_a_weighting_chart(
 def create_octave_band_chart(
     audio: np.ndarray,
     sample_rate: int,
-    title: str = "1/3 倍頻程分析"
+    title: str = "1/3 倍頻程分析",
+    use_a_weighting: bool = True
 ) -> go.Figure:
     """建立 1/3 倍頻程分析圖
 
-    依據 ISO 標準頻帶分析能量分布。
+    使用 FFT 合成法 (FFT Synthesis) 實現 IEC 61260-1:2014 標準。
+    此方法在全頻帶上都非常穩定，特別是高頻部分。
 
     Args:
         audio: 音訊資料
         sample_rate: 取樣率 (Hz)
         title: 圖表標題
+        use_a_weighting: 是否套用 A-weighting (預設 True)
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
-    from scipy.signal import butter, sosfilt
+    from scipy.fft import rfft, rfftfreq
+
+    # 完全複製 STFT Average 邏輯 (Manual STFT Implementation)
     
-    # 1/3 倍頻程中心頻率 (ISO 規範)
-    center_freqs = [
-        25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200,
-        250, 315, 400, 500, 630, 800, 1000, 1250, 1600, 2000,
-        2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000
+    from scipy.fft import rfft, rfftfreq
+    
+    # 參數驗證與強制轉型
+    try:
+        sample_rate = float(sample_rate)
+        if sample_rate <= 0: raise ValueError
+    except:
+        sample_rate = 48000.0  # Fallback
+        
+    # 確保音訊為 float64
+    audio = np.asarray(audio, dtype=np.float64).flatten()
+    n_samples = len(audio)
+    
+    n_fft = 16384
+    hop_length = n_fft // 2
+    
+    if n_samples < n_fft:
+        n_fft = n_samples
+        hop_length = n_samples
+    
+    window = np.hanning(n_fft)
+    freqs = rfftfreq(n_fft, 1/sample_rate)
+    
+    n_frames = 1 + (n_samples - n_fft) // hop_length
+    if n_frames < 1: n_frames = 1
+    
+    mag_sum = np.zeros(len(freqs))
+    valid_frames = 0
+    
+    for i in range(n_frames):
+        start = i * hop_length
+        end = start + n_fft
+        
+        if end > n_samples: break
+             
+        frame = audio[start:end] * window
+        spec = np.abs(rfft(frame)) / n_fft
+        spec[1:-1] *= 2 
+        mag_sum += spec
+        valid_frames += 1
+        
+    if valid_frames > 0:
+        avg_mag = mag_sum / valid_frames
+    else:
+        padded = np.zeros(n_fft)
+        padded[:n_samples] = audio * np.hanning(n_samples)
+        avg_mag = np.abs(rfft(padded)) / n_fft
+        avg_mag[1:-1] *= 2
+
+    # A-weighting
+    def get_a_weighting(f):
+        f = np.array(f, dtype=float)
+        valid = f > 0
+        result = np.zeros_like(f)
+        f_val = f[valid]
+        f2 = f_val**2
+        const = 12194**2 * f_val**2  # 修正公式 (分子是 f^4, 但在 magnitude domain 開根號後是 f^2 ?)
+        # A-weighting 標準公式是用 Power (dB = 20log...), 所以 Magnitude 應該直接套用
+        # Ra(f) 的分子是 12194^2 * f^4
+        # 所以 Magnitude Gain = sqrt(Ra(f)) ??
+        # 不，standard formula returns dB. We use 10^(dB/20) for magnitude gain.
+        const = 12194**2 * f_val**4
+        div = (f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2)
+        result[valid] = 20 * np.log10(const / div + 1e-10) + 2.0
+        return result
+
+    nominal_freqs = [
+        12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250,
+        315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000,
+        5000, 6300, 8000, 10000, 12500, 16000, 20000
     ]
     
-    # 過濾超出 Nyquist 頻率的頻帶
-    nyquist = sample_rate / 2
-    center_freqs = [f for f in center_freqs if f < nyquist * 0.9]
+    G = 10 ** (3/10)
+    FRACTION = 3
     
     band_levels = []
-    valid_freqs = []
+    processed_freqs = []
     
-    for fc in center_freqs:
-        # 1/3 倍頻程頻寬
-        factor = 2 ** (1/6)  # 1/3 octave
+    if use_a_weighting:
+        a_weight_db = get_a_weighting(freqs)
+        a_weight_linear = 10 ** (a_weight_db / 20)
+        weighted_mag = avg_mag * a_weight_linear
+    else:
+        weighted_mag = avg_mag
+        
+    nyquist = sample_rate / 2
+    
+    for fc in nominal_freqs:
+        factor = G ** (1 / (2 * FRACTION))
         f_low = fc / factor
         f_high = fc * factor
+        effective_f_high = min(f_high, nyquist)
         
-        # 確保在有效範圍內
-        if f_high >= nyquist:
-            continue
-        if f_low < 20:
-            f_low = 20
-            
-        try:
-            # 帶通濾波
-            sos = butter(4, [f_low, f_high], btype='band', fs=sample_rate, output='sos')
-            filtered = sosfilt(sos, audio)
-            
-            # 計算 RMS 能量
-            rms = np.sqrt(np.mean(filtered ** 2))
-            level_db = 20 * np.log10(rms + 1e-10)
-            
-            band_levels.append(level_db)
-            valid_freqs.append(fc)
-        except:
-            pass
+        # 即使超過 Nyquist，我們也強制計算(會有空值)以保留 X 軸位置
+        
+        indices = np.where((freqs >= f_low) & (freqs < effective_f_high))[0]
+        
+        val_to_append = -120.0
+        
+        if len(indices) > 0:
+            band_energy = np.sum(weighted_mag[indices]**2)
+            if band_energy > 1e-20:
+                val_to_append = 10 * np.log10(band_energy)
+        elif f_low < nyquist:
+            # Interpolation only if within Nyquist range
+            idx = np.abs(freqs - fc).argmin()
+            bin_width = sample_rate / n_fft
+            band_width = effective_f_high - f_low
+            scale = band_width / bin_width
+            band_energy = (weighted_mag[idx]**2) * scale
+            if band_energy > 1e-20:
+                val_to_append = 10 * np.log10(band_energy)
+                
+        band_levels.append(val_to_append)
+        processed_freqs.append(fc)
 
+    # 正規化
+    raw_max = max(band_levels) if band_levels else -120
+    offset = 0
+    if band_levels:
+        max_level = max(band_levels)
+        if max_level < 0:
+             offset = 5 - max_level
+             band_levels = [level + offset for level in band_levels]
+    
+    unit_label = "dB(A)" if use_a_weighting else "dB"
+    
+    # 建構 X 軸標籤列表
+    x_labels = [f'{int(f)}' if f < 1000 else f'{f/1000:.1f}k' for f in processed_freqs]
+    
     fig = go.Figure()
 
-    # 長條圖
-    colors = ['#3498db' if level > -60 else '#95a5a6' for level in band_levels]
-    
     fig.add_trace(go.Bar(
-        x=[f'{f:.0f}' if f < 1000 else f'{f/1000:.1f}k' for f in valid_freqs],
+        x=x_labels,
         y=band_levels,
-        marker_color=colors,
-        marker_line=dict(color='#2c3e50', width=1),
-        hovertemplate='頻率: %{customdata:.0f} Hz<br>能量: %{y:.1f} dB<extra></extra>',
-        customdata=valid_freqs
+        marker_color='#2ecc71',
+        marker_line=dict(color='#1e8449', width=1),
+        hovertemplate='頻率: %{customdata:.0f} Hz<br>Level: %{y:.1f} ' + unit_label + '<extra></extra>',
+        customdata=processed_freqs,
+        # 只顯示 > -50 dB 的數值，避免畫面過於雜亂
+        text=[f"{y:.1f}" if y > -50 else "" for y in band_levels], 
+        textposition='auto',
+        textfont=dict(size=10)
     ))
-
+    
+    # 圖表標題
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16, color='#333')),
+        title=dict(text=f"{title} ({unit_label})", font=dict(size=16, color='#333')),
+        annotations=[
+            dict(
+                text=f"Sample Rate: {sample_rate:.0f}Hz | Method: FFT Synthesis (STFT Avg)",
+                xref="paper", yref="paper",
+                x=1.0, y=1.05,
+                showarrow=False,
+                font=dict(size=10, color="gray")
+            )
+        ],
         xaxis=dict(
             title='中心頻率 (Hz)',
-            tickangle=-45
+            tickangle=-45,
+            tickmode='array',
+            tickvals=list(range(len(x_labels))),
+            ticktext=x_labels,
+            type='category'
         ),
         yaxis=dict(
-            title='能量 (dB)',
+            title=f'L(A) {unit_label}' if use_a_weighting else f'Level ({unit_label})',
             showgrid=True,
-            gridcolor='rgba(128, 128, 128, 0.3)'
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            range=[-100, 20]
         ),
         dragmode='zoom',
         plot_bgcolor='white',
         paper_bgcolor='white',
-        margin=dict(l=60, r=40, t=60, b=100),
-        bargap=0.2
+        margin=dict(l=60, r=40, t=80, b=100),
+        bargap=0.15
     )
 
     return fig

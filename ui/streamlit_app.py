@@ -14,9 +14,11 @@ import tempfile
 import os
 from pathlib import Path
 import sys
-
 # 加入專案路徑
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from datetime import datetime
+from utils.report import generate_excel_report
 
 
 def main():
@@ -44,6 +46,31 @@ def main():
     # 側邊欄設定
     with st.sidebar:
         st.header("⚙️ 分析設定")
+        
+        # === HEAD ArtemiS 對齊功能 ===
+        st.subheader("📊 頻譜分析模式")
+        spectrum_mode = st.selectbox(
+            "分析模式",
+            options=['average', 'peak_hold', 'psd'],
+            format_func=lambda x: {
+                'average': '📊 FFT Average (平均)',
+                'peak_hold': '📈 FFT Peak Hold (峰值保持)',
+                'psd': '📉 PSD (功率頻譜密度)'
+            }.get(x, x),
+            help="Average: 時間平均 | Peak Hold: 取最大值 | PSD: 功率歸一化到 1 Hz"
+        )
+        
+        window_function = st.selectbox(
+            "窗函數",
+            options=['hann', 'hamming', 'blackman', 'flattop'],
+            format_func=lambda x: {
+                'hann': '🔔 Hann (通用)',
+                'hamming': '🔷 Hamming (更佳旁瓣抑制)',
+                'blackman': '⚫ Blackman (最佳旁瓣抑制)',
+                'flattop': '⬜ Flat Top (幅度精確)'
+            }.get(x, x),
+            help="Hann: 95% 應用適用 | Blackman: 需極佳旁瓣抑制 | Flat Top: 幅度校準"
+        )
         
         highpass_cutoff = st.slider(
             "高通濾波截止頻率 (Hz)",
@@ -93,36 +120,90 @@ def main():
                 removed_bands.append("ultra_high_freq")
         
         st.markdown("---")
+        st.subheader("📄 報告生成 (AUD-008)")
+        
+        if st.session_state.get('audio_loaded', False):
+            if st.button("📊 生成 Excel 報告", key="btn_gen_report", use_container_width=True):
+                with st.spinner("正在彙整數據並生成報告..."):
+                    # 使用原始未過濾音訊
+                    report_data, error = generate_excel_report(
+                        st.session_state.audio_original,
+                        st.session_state.sr,
+                        filename=st.session_state.get('audio_filename', "audio.wav")
+                    )
+                    
+                    if error:
+                        st.error(error)
+                    else:
+                        st.session_state['report_xlsx'] = report_data
+                        st.success("✅ 報告生成成功")
+
+            if 'report_xlsx' in st.session_state:
+                st.download_button(
+                    label="⬇️ 下載 Excel 報表",
+                    data=st.session_state['report_xlsx'],
+                    file_name=f"Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+        else:
+            st.caption("請先上傳音檔以啟用報告功能")
+
+        st.markdown("---")
         st.caption("v1.0.0 | 聲學測試 AI 分析系統")
 
     # 主要內容區
     st.header("📁 上傳音檔")
     
-    uploaded_file = st.file_uploader(
-        "選擇要分析的音檔",
+    uploaded_files = st.file_uploader(
+        "選擇要分析的音檔 (支援多選)",
         type=["wav", "mp3", "flac"],
+        accept_multiple_files=True,
         help="支援 WAV、MP3、FLAC 格式，檔案大小上限 50MB"
     )
 
-    if uploaded_file is not None:
-        st.success(f"✅ 已上傳: **{uploaded_file.name}** ({uploaded_file.size / 1024 / 1024:.2f} MB)")
-        
-        # 開始分析按鈕 - 只載入音檔一次
-        if st.button("🚀 開始分析", type="primary", use_container_width=True):
-            load_audio_file(uploaded_file)
-        
-        # 如果音檔已載入，根據側邊欄設定即時顯示分析結果
-        if st.session_state.audio_loaded:
-            render_analysis_results(
-                highpass_cutoff,
-                analyze_noise,
-                analyze_spectrum,
-                analyze_discrete_tone,
-                analyze_high_freq,
-                analyze_band_filter,
-                removed_bands,
-                use_a_weighting
-            )
+    if uploaded_files:
+        if len(uploaded_files) == 1:
+            uploaded_file = uploaded_files[0]
+            st.success(f"✅ 已上傳: **{uploaded_file.name}** ({uploaded_file.size / 1024 / 1024:.2f} MB)")
+            
+            # 開始分析按鈕 - 只載入音檔一次
+            if st.button("🚀 開始分析", type="primary", use_container_width=True):
+                load_audio_file(uploaded_file)
+            
+            # 如果音檔已載入，根據側邊欄設定即時顯示分析結果
+            if st.session_state.audio_loaded:
+                render_analysis_results(
+                    highpass_cutoff,
+                    analyze_noise,
+                    analyze_spectrum,
+                    analyze_discrete_tone,
+                    analyze_high_freq,
+                    analyze_band_filter,
+                    removed_bands,
+                    use_a_weighting,
+                    spectrum_mode,
+                    window_function
+                )
+        else:
+            # 批次模式
+            st.success(f"✅ 已上傳 **{len(uploaded_files)}** 個檔案，準備進行批次分析")
+            if st.button(f"🚀 開始批次分析", type="primary", use_container_width=True):
+                process_batch_analysis(uploaded_files)
+            
+            if st.session_state.get('batch_data'):
+                render_batch_dashboard(
+                    highpass_cutoff,
+                    analyze_noise,
+                    analyze_spectrum,
+                    analyze_discrete_tone,
+                    analyze_high_freq,
+                    analyze_band_filter,
+                    removed_bands,
+                    use_a_weighting,
+                    spectrum_mode,
+                    window_function
+                )
     else:
         # 清除已載入的音檔
         st.session_state.audio_loaded = False
@@ -173,6 +254,7 @@ def load_audio_file(uploaded_file):
             st.session_state.sr = sr
             st.session_state.validation = validation
             st.session_state.audio_loaded = True
+            st.session_state.audio_filename = uploaded_file.name
             
             st.rerun()  # 重新運行以顯示分析結果
             
@@ -183,8 +265,22 @@ def load_audio_file(uploaded_file):
 
 def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum, 
                             analyze_discrete_tone, analyze_high_freq, 
-                            analyze_band_filter, removed_bands, use_a_weighting=True):
-    """根據側邊欄設定即時渲染分析結果"""
+                            analyze_band_filter, removed_bands, use_a_weighting=True,
+                            spectrum_mode='average', window_function='hann'):
+    """根據側邊欄設定即時渲染分析結果
+    
+    Args:
+        highpass_cutoff: 高通濾波截止頻率
+        analyze_noise: 是否分析噪音等級
+        analyze_spectrum: 是否分析頻譜
+        analyze_discrete_tone: 是否檢測 Discrete Tone
+        analyze_high_freq: 是否分析高頻
+        analyze_band_filter: 是否啟用頻帶過濾
+        removed_bands: 要移除的頻帶列表
+        use_a_weighting: 是否套用 A-weighting
+        spectrum_mode: 頻譜分析模式 (average/peak_hold/psd)
+        window_function: 窗函數 (hann/hamming/blackman/flattop)
+    """
     import numpy as np
     import io
     import soundfile as sf
@@ -206,8 +302,8 @@ def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum,
         audio = audio_original
     
     # 顯示加權模式
-    if use_a_weighting:
-        st.info("👂 **A-weighting 已啟用**: 所有頻譜數據已套用 A-weighting 加權，模擬人耳感知")
+    # 顯示加權模式 (已移除單純展示)
+    pass
     
     # 顯示音檔資訊
     display_audio_info(validation)
@@ -235,7 +331,7 @@ def render_analysis_results(highpass_cutoff, analyze_noise, analyze_spectrum,
         run_noise_analysis(audio, sr)
 
     if analyze_spectrum:
-        run_spectrum_analysis(audio, sr, use_a_weighting)
+        run_spectrum_analysis(audio, sr, use_a_weighting, spectrum_mode, window_function)
 
     if analyze_discrete_tone:
         run_discrete_tone_analysis(audio, sr)
@@ -295,15 +391,18 @@ def run_noise_analysis(audio, sr):
     st.markdown("---")
 
 
-def run_spectrum_analysis(audio, sr, use_a_weighting=True):
+def run_spectrum_analysis(audio, sr, use_a_weighting=True, 
+                          spectrum_mode='average', window_function='hann'):
     """執行頻譜分析 - 多種圖表即時切換
     
     Args:
         audio: 音訊資料
         sr: 取樣率
         use_a_weighting: 是否套用 A-weighting 加權
+        spectrum_mode: 分析模式 (average/peak_hold/psd)
+        window_function: 窗函數 (hann/hamming/blackman/flattop)
     """
-    from core.fft import compute_average_spectrum, apply_a_weighting
+    from core.fft import compute_spectrum_with_mode, apply_a_weighting
     from utils.interactive_plots import (
         create_interactive_spectrum,
         create_waveform_chart,
@@ -315,15 +414,25 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True):
     )
     import numpy as np
     
-    # 計算頻譜 (只需計算一次)
-    frequencies, magnitudes_db = compute_average_spectrum(audio, sr)
+    # 分析模式對應的標籤
+    mode_labels = {
+        'average': 'FFT Average',
+        'peak_hold': 'FFT Peak Hold',
+        'psd': 'PSD'
+    }
+    mode_label = mode_labels.get(spectrum_mode, spectrum_mode)
+    
+    # 使用指定模式和窗函數計算頻譜
+    frequencies, magnitudes_db, unit = compute_spectrum_with_mode(
+        audio, sr, mode=spectrum_mode, window=window_function
+    )
     
     # 套用 A-weighting (如果啟用)
     if use_a_weighting:
         magnitudes_db = apply_a_weighting(frequencies, magnitudes_db)
-        weight_label = "dB(A)"
+        weight_label = f"{unit}(A)" if unit != 'dB/Hz' else "dB(A)/Hz"
     else:
-        weight_label = "dB"
+        weight_label = unit
     
     # 將結果存入 session_state 供圖表切換使用
     st.session_state['audio'] = audio
@@ -331,16 +440,17 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True):
     st.session_state['frequencies'] = frequencies
     st.session_state['magnitudes_db'] = magnitudes_db
     st.session_state['use_a_weighting'] = use_a_weighting
+    st.session_state['spectrum_mode'] = spectrum_mode
+    st.session_state['window_function'] = window_function
     
-    st.subheader(f"📈 頻譜分析 (多種視圖) - {weight_label}")
-    st.caption("💡 提示: 切換不同圖表類型即時顯示，支援滑鼠縮放、平移、十字座標")
+    st.subheader(f"📈 頻譜分析 [{mode_label}] - {weight_label}")
+    st.caption(f"💡 模式: {mode_label} | 窗函數: {window_function.capitalize()} | 支援縮放、平移、十字座標")
     
     # 使用 tabs 實現即時切換
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         f"📊 FFT 頻譜 ({weight_label})", 
         "🌊 波形圖", 
         "🔥 Spectrogram", 
-        "👂 A-weighting 曲線", 
         f"📶 1/3 倍頻程 ({weight_label})",
         "🌀 3D Waterfall",
         "📋 綜合視圖"
@@ -363,21 +473,16 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True):
         st.plotly_chart(spectrogram_fig, use_container_width=True, key="spectrogram")
     
     with tab4:
-        a_weight_fig = create_a_weighting_chart(sr)
-        st.plotly_chart(a_weight_fig, use_container_width=True, key="a_weight")
-        st.info("💡 此曲線顯示 A-weighting 的頻率響應。當 '套用 A-weighting 加權' 啟用時，此曲線已套用到所有頻譜數據。")
+        octave_fig = create_octave_band_chart(audio, sr, use_a_weighting=use_a_weighting)
+        st.plotly_chart(octave_fig, use_container_width=True, key="octave")
+        st.info("💡 1/3 倍頻程分析依 IEC 61260 標準，對齊 HEAD acoustics ArtemiS 計算方式。")
     
     with tab5:
-        octave_fig = create_octave_band_chart(audio, sr)
-        st.plotly_chart(octave_fig, use_container_width=True, key="octave")
-        st.info("💡 1/3 倍頻程分析依 ISO 標準將頻譜分成標準頻帶，常用於噪音評估和聲學測量。")
-    
-    with tab6:
         waterfall_fig = create_waterfall_3d_chart(audio, sr)
         st.plotly_chart(waterfall_fig, use_container_width=True, key="waterfall")
         st.info("💡 3D Waterfall 圖可旋轉、縮放。拖曳可改變視角，滾輪縮放。")
     
-    with tab7:
+    with tab6:
         combined_fig = create_combined_analysis_chart(audio, sr, frequencies, magnitudes_db)
         st.plotly_chart(combined_fig, use_container_width=True, key="combined")
     
@@ -708,6 +813,315 @@ def run_band_filter_comparison(audio_original, audio_filtered, sr, removed_bands
         st.metric("能量降低", f"{db_reduction:.1f} dB", delta=f"-{db_reduction:.1f}")
     
     st.markdown("---")
+
+
+def process_batch_analysis(uploaded_files):
+    """執行批次分析"""
+    import pandas as pd
+    import tempfile
+    import os
+    from core.audio_loader import load_audio, validate_audio
+    from core.noise_level import calculate_noise_level
+    from core.fft import compute_average_spectrum
+    from core.high_freq_detector import analyze_high_frequency
+    from core.band_analyzer import compute_octave_bands
+    
+    batch_results = {}
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    count = len(uploaded_files)
+    
+    for i, file in enumerate(uploaded_files):
+        status_text.text(f"正在分析 ({i+1}/{count}): {file.name}...")
+        
+        # Save temp
+        suffix = f".{file.name.split('.')[-1]}"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(file.getvalue())
+            tmp_path = tmp.name
+            
+        try:
+            # 1. Validate Audio
+            validation = validate_audio(tmp_path, strict=False)
+            
+            # 2. Load Audio
+            audio, sr = load_audio(tmp_path)
+            
+            # 3. Noise Level
+            noise = calculate_noise_level(audio, sr)
+            
+            # 4. High Freq
+            hf = analyze_high_frequency(audio, sr)
+            
+            # 5. Spectrum
+            freqs, mags = compute_average_spectrum(audio, sr)
+            
+            # 6. 1/3 Octave Bands
+            octave = compute_octave_bands(audio, sr, use_a_weighting=True)
+            
+            # Store Result
+            batch_results[file.name] = {
+                "noise": noise,
+                "high_freq": hf,
+                "spectrum": {"freqs": freqs, "mags": mags},
+                "octave": octave,
+                "sr": sr,
+                "duration": len(audio)/sr,
+                "audio": audio, # Save raw audio
+                "validation": validation # Save validation info
+            }
+            
+        except Exception as e:
+            st.error(f"分析 {file.name} 失敗: {e}")
+            
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+            
+        progress_bar.progress((i + 1) / count)
+        
+    st.session_state['batch_data'] = batch_results
+    status_text.success("批次分析完成!")
+    st.rerun()
+
+
+def render_batch_dashboard(
+    highpass_cutoff,
+    analyze_noise,
+    analyze_spectrum,
+    analyze_discrete_tone,
+    analyze_high_freq,
+    analyze_band_filter,
+    removed_bands,
+    use_a_weighting,
+    spectrum_mode,
+    window_function
+):
+    """顯示批次分析儀表板"""
+    import plotly.graph_objects as go
+    
+    data = st.session_state.get('batch_data', {})
+    if not data:
+        return
+
+    st.header("📊 批次分析比較儀表板")
+    
+    # 1. Comparison Table
+    st.subheader("1. 數據總表")
+    table_rows = []
+    
+    for name, res in data.items():
+        n = res['noise']
+        hf = res['high_freq']
+        table_rows.append({
+            "Filename": name,
+            "Leq (dBA)": n['leq_dba'],
+            "Lmax": n['lmax_dba'],
+            "L90": n['l90'],
+            "Coil Whine": "YES" if hf['coil_whine_detected'] else "NO",
+            "CW Freq": f"{hf.get('coil_whine_frequency', 0):.0f}" if hf['coil_whine_detected'] else "-",
+            "CW Prom": f"{hf.get('coil_whine_prominence', 0):.1f}" if hf['coil_whine_detected'] else "-"
+        })
+    
+    import pandas as pd
+    df = pd.DataFrame(table_rows)
+    st.dataframe(df, use_container_width=True)
+    
+    st.download_button(
+        label="⬇️ 下載比較總表 (CSV)",
+        data=df.to_csv(index=False).encode('utf-8-sig'),
+        file_name=f"Batch_Summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv"
+    )
+    
+
+    # File Selector for Comparison Charts
+    st.subheader("2. 詳細比較分析")
+    st.caption("建議選擇 2-3 個檔案進行詳細比較，以免畫面過於擁擠")
+    selected_files = st.multiselect("選擇要比較的檔案", options=list(data.keys()), default=list(data.keys())[:2])
+    
+    if not selected_files:
+        st.info("請選擇至少一個檔案進行比較")
+        return
+
+    # Import visualization tools
+    from utils.interactive_plots import (
+        create_spectrogram_chart,
+        create_waterfall_3d_chart,
+        create_octave_band_chart
+    )
+    
+    # 1. 1/3 Octave Comparison (Grouped Bar)
+    st.markdown("#### 1/3 倍頻程比較 (Grouped Bar)")
+    fig_oct = go.Figure()
+    
+    for name in selected_files:
+        oct_data = data[name]['octave']
+        # Use Bar for grouped comparison
+        fig_oct.add_trace(go.Bar(
+            x=oct_data['nominal_freqs'],
+            y=oct_data['band_levels'],
+            name=name,
+            opacity=0.8
+        ))
+        
+    fig_oct.update_layout(
+        title="1/3 倍頻程頻譜比較",
+        xaxis_title="頻率 (Hz)",
+        yaxis_title="音壓級 dB(A)",
+        xaxis_type="log",
+        barmode='group', # Grouped bars
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_oct, use_container_width=True)
+
+    # 2. FFT Comparison (Line)
+    st.markdown("#### FFT 細部頻譜比較 (Overlay)")
+    fig_fft = go.Figure()
+    for name in selected_files:
+        spec = data[name]['spectrum']
+        mask = spec['freqs'] <= 20000
+        x_vals = spec['freqs'][mask]
+        y_vals = spec['mags'][mask]
+        
+        fig_fft.add_trace(go.Scatter(
+            x=x_vals, 
+            y=y_vals,
+            name=name,
+            mode='lines',
+            line=dict(width=1)
+        ))
+    fig_fft.update_layout(
+        title="FFT 平均頻譜比較",
+        xaxis_title="頻率 (Hz)",
+        yaxis_title="幅度 (dB)",
+        hovermode="x unified",
+        xaxis_type="log"
+    )
+    st.plotly_chart(fig_fft, use_container_width=True)
+    
+    # 3. Level vs Time
+    st.markdown("#### 噪音等級趨勢 (Level vs Time)")
+    fig_time = go.Figure()
+    has_profile = False
+    
+    for name in selected_files:
+        profile = data[name]['noise'].get('profile', {})
+        if profile and 'times' in profile and 'levels' in profile:
+            has_profile = True
+            times = profile['times']
+            levels = profile['levels']
+            if len(times) > 5000:
+                step = len(times) // 5000
+                times = times[::step]
+                levels = levels[::step]
+            
+            fig_time.add_trace(go.Scatter(
+                x=times, 
+                y=levels,
+                name=name,
+                mode='lines',
+                line=dict(width=1.5)
+            ))
+            
+    if has_profile:
+        fig_time.update_layout(
+            title="噪音等級趨勢比較 (Leq Profile)",
+            xaxis_title="時間 (秒)",
+            yaxis_title="音壓級 dB(A)",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_time, use_container_width=True)
+
+    # 4. Spectrogram Comparison (Side-by-side)
+    st.markdown("#### Spectrogram 對照比較")
+    cols = st.columns(len(selected_files))
+    for i, name in enumerate(selected_files):
+        with cols[i]:
+            st.markdown(f"**{name}**")
+            audio_data = data[name].get('audio', None)
+            sr_data = data[name].get('sr', 48000)
+            if audio_data is not None:
+                # Reuse existing function
+                fig_spec = create_spectrogram_chart(audio_data, sr_data, title=f"Spectrogram: {name}")
+                st.plotly_chart(fig_spec, use_container_width=True, key=f"batch_spec_{i}")
+            else:
+                st.warning("無音訊數據")
+
+    # 5. 3D Waterfall Comparison (Side-by-side)
+    st.markdown("#### 3D Waterfall 對照比較")
+    cols_water = st.columns(len(selected_files))
+    for i, name in enumerate(selected_files):
+        with cols_water[i]:
+            st.markdown(f"**{name}**")
+            audio_data = data[name].get('audio', None)
+            sr_data = data[name].get('sr', 48000)
+            if audio_data is not None:
+                fig_water = create_waterfall_3d_chart(audio_data, sr_data)
+                # Update title
+                fig_water.update_layout(title=f"Waterfall: {name}")
+                st.plotly_chart(fig_water, use_container_width=True, key=f"batch_water_{i}")
+            else:
+                st.warning("無音訊數據")
+
+        
+    # --- Detail Inspector ---
+    st.markdown("---")
+    st.header("🔍 單檔詳細分析檢視 (Detail Inspector)")
+    
+    detail_file = st.selectbox("選擇要查看詳細報告的檔案", options=["(請選擇)"] + list(data.keys()))
+    
+    if detail_file and detail_file != "(請選擇)":
+        target_data = data[detail_file]
+        
+        # Inject data into global session state to simulate Single File Mode
+        st.session_state.audio_loaded = True
+        st.session_state.audio_original = target_data['audio']
+        st.session_state.sr = target_data['sr']
+        st.session_state.audio_filename = detail_file
+        # Fix: Inject validation info
+        if 'validation' in target_data:
+            st.session_state.validation = target_data['validation']
+        else:
+            # Fallback if old data present in session (should not happen if re-run)
+            st.session_state.validation = {
+                "file_valid": True,
+                "sample_rate": target_data['sr'],
+                "duration": target_data['duration'],
+                "channels": 1,
+                "bit_depth": 16, # Assume 16
+                "file_size_mb": 0,
+                "warnings": []
+            }
+        
+        st.info(f"正在顯示 **{detail_file}** 的詳細分析結果...")
+        
+        # Reuse the main analysis renderer
+        # Ensure we capture current sidebar settings
+        # We need to access the sidebar widget values. They are in 'main' scope...
+        # But Streamlit widgets are global in session_state usually.
+        # However, variables like 'highpass_cutoff' are passed as args.
+        # We need to grab them from session_state or default?
+        # Sidebar widgets were defined in 'main()'. They are local variables there.
+        # WE CANNOT ACCESS 'highpass_cutoff' here easily unless we pass them or read session state keys.
+        
+        render_analysis_results(
+            highpass_cutoff,
+            analyze_noise,
+            analyze_spectrum,
+            analyze_discrete_tone,
+            analyze_high_freq,
+            analyze_band_filter,
+            removed_bands,
+            use_a_weighting,
+            spectrum_mode,
+            window_function
+        )
+
 
 
 if __name__ == "__main__":

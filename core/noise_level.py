@@ -350,13 +350,22 @@ def calculate_noise_level(
 
     # 計算統計音壓級
     stat_levels = calculate_statistical_levels(frame_levels)
+    
+    # 準備時間軸數據
+    dt = frame_length / sample_rate
+    times = np.arange(len(frame_levels)) * dt
 
     return {
         "leq_dba": leq,
         "lmax_dba": lmax,
         "lmin_dba": lmin,
         "l10": stat_levels["l10"],
-        "l90": stat_levels["l90"]
+        "l90": stat_levels["l90"],
+        # 原始 Profile 數據 (用於報告與繪圖)
+        "profile": {
+            "times": times,
+            "levels": frame_levels
+        }
     }
 
 

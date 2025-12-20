@@ -315,6 +315,145 @@ def compute_average_spectrum(
     return frequencies, avg_magnitudes_db
 
 
+def compute_psd(
+    audio: np.ndarray,
+    sample_rate: int,
+    n_fft: int = None,
+    hop_length: int = None,
+    window: str = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """計算功率頻譜密度 (Power Spectral Density)
+    
+    將功率歸一化到 1 Hz 頻寬，符合 HEAD acoustics ArtemiS 的 PSD 分析標準。
+    
+    PSD 公式: PSD = |FFT|² / (n_fft × Δf)
+    
+    Args:
+        audio: 音訊資料 (1D numpy 陣列)
+        sample_rate: 取樣率 (Hz)
+        n_fft: FFT 點數
+        hop_length: 幀移動步長
+        window: 窗函數類型
+        
+    Returns:
+        Tuple[np.ndarray, np.ndarray]:
+            - frequencies: 頻率陣列 (Hz)
+            - psd_db: 功率頻譜密度 (dB/Hz)
+    """
+    if n_fft is None:
+        n_fft = config.fft.n_fft
+    
+    # 計算 STFT
+    times, frequencies, spectrogram_db = compute_stft(
+        audio, sample_rate, n_fft, hop_length, window
+    )
+    
+    # 轉回線性域
+    spectrogram_linear = 10 ** (spectrogram_db / 20)
+    
+    # 計算功率 (幅度的平方)
+    power = spectrogram_linear ** 2
+    
+    # 平均功率
+    avg_power = np.mean(power, axis=1)
+    
+    # 頻率解析度 (Hz)
+    freq_resolution = sample_rate / n_fft
+    
+    # 歸一化到 1 Hz 頻寬 (PSD = Power / Δf)
+    psd = avg_power / freq_resolution
+    
+    # 轉為 dB
+    psd_db = 10 * np.log10(psd + EPSILON)
+    
+    return frequencies, psd_db
+
+
+def compute_peak_hold_spectrum(
+    audio: np.ndarray,
+    sample_rate: int,
+    n_fft: int = None,
+    hop_length: int = None,
+    window: str = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """計算峰值保持頻譜 (Peak Hold)
+    
+    對所有 FFT 區塊取最大值，符合 HEAD acoustics ArtemiS 的 Peak Hold 分析標準。
+    用於分析最大噪音水平。
+    
+    Args:
+        audio: 音訊資料 (1D numpy 陣列)
+        sample_rate: 取樣率 (Hz)
+        n_fft: FFT 點數
+        hop_length: 幀移動步長
+        window: 窗函數類型
+        
+    Returns:
+        Tuple[np.ndarray, np.ndarray]:
+            - frequencies: 頻率陣列 (Hz)
+            - peak_magnitudes_db: 峰值能量陣列 (dB)
+    """
+    # 計算 STFT
+    times, frequencies, spectrogram_db = compute_stft(
+        audio, sample_rate, n_fft, hop_length, window
+    )
+    
+    # 對時間軸取最大值
+    peak_magnitudes_db = np.max(spectrogram_db, axis=1)
+    
+    return frequencies, peak_magnitudes_db
+
+
+def compute_spectrum_with_mode(
+    audio: np.ndarray,
+    sample_rate: int,
+    mode: str = 'average',
+    n_fft: int = None,
+    hop_length: int = None,
+    window: str = None
+) -> Tuple[np.ndarray, np.ndarray, str]:
+    """根據模式計算頻譜
+    
+    支援多種分析模式，對齊 HEAD acoustics ArtemiS 的功能。
+    
+    Args:
+        audio: 音訊資料
+        sample_rate: 取樣率 (Hz)
+        mode: 分析模式
+            - 'average': 平均頻譜 (預設)
+            - 'peak_hold': 峰值保持
+            - 'psd': 功率頻譜密度
+        n_fft: FFT 點數
+        hop_length: 幀移動步長
+        window: 窗函數類型
+        
+    Returns:
+        Tuple[np.ndarray, np.ndarray, str]:
+            - frequencies: 頻率陣列 (Hz)
+            - magnitudes: 能量陣列
+            - unit: 單位描述
+    """
+    if mode == 'average':
+        frequencies, magnitudes = compute_average_spectrum(
+            audio, sample_rate, n_fft, hop_length, window
+        )
+        unit = 'dB'
+    elif mode == 'peak_hold':
+        frequencies, magnitudes = compute_peak_hold_spectrum(
+            audio, sample_rate, n_fft, hop_length, window
+        )
+        unit = 'dB (Peak)'
+    elif mode == 'psd':
+        frequencies, magnitudes = compute_psd(
+            audio, sample_rate, n_fft, hop_length, window
+        )
+        unit = 'dB/Hz'
+    else:
+        raise ValueError(f"未知的分析模式: {mode}. 支援: average, peak_hold, psd")
+    
+    return frequencies, magnitudes, unit
+
+
 def find_peaks(
     frequencies: np.ndarray,
     magnitudes_db: np.ndarray,

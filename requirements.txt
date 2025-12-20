@@ -25,3 +25,12 @@ pydantic>=2.12.0
 
 # 音檔處理 (librosa 依賴)
 soundfile>=0.13.0
+
+# 聲學分析 (IEC 61260-1:2014 標準)
+acoustics>=0.2.6
+
+# 倍頻程濾波器組 (IEC-61260 標準)
+# pip install git+https://github.com/SiggiGue/pyfilterbank.git
+
+# Excel 報告生成
+openpyxl>=3.1.2

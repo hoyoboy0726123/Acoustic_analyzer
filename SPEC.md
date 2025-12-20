@@ -236,7 +236,7 @@ def analyze_high_frequency(audio_path, cutoff=4000):
 
 ### 3.6 AUD-006 頻帶分離分析
 
-**功能描述**: 將音訊分割為多個頻帶，分別計算各頻帶能量。
+**功能描述**: 依據 IEC 61260-1 標準，使用 FFT Synthesis (STFT Avg) 方法進行 1/3 倍頻程分析 (20Hz-20kHz)。確保與 FFT 頻譜圖視覺一致性。
 
 **輸出**: 各頻帶的 dB 值、佔比百分比、主要噪音來源判斷。
 
