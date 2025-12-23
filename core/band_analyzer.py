@@ -29,32 +29,34 @@ from app.config import config
 
 # 導入相關模組
 from core.filters import bandpass_filter
-from core.noise_level import calculate_rms, rms_to_db
+from core.noise_level import calculate_rms, rms_to_db, REFERENCE_PRESSURE, EPSILON
 
 
 def compute_octave_bands(
     audio: np.ndarray,
     sample_rate: int,
     use_a_weighting: bool = True,
-    n_fft: int = 16384
+    filter_order: int = 6
 ) -> Dict[str, Any]:
-    """計算 1/3 倍頻程頻譜 (FFT Synthesis 方法)
+    """計算 1/3 倍頻程頻譜 (IEC 61260-1:2014 濾波器法)
 
-    使用 STFT Average Magnitude Spectrum 合成 1/3 倍頻程能量，
-    確保與前端顯示的 FFT 頻譜圖一致。符合 IEC 61260-1 頻帶劃分。
+    使用 Butterworth 帶通濾波器組實現，符合 IEC 61260-1:2014 和 ANSI S1.11 標準。
+    與 HEAD acoustics ArtemiS SUITE 的 "1/n Octave (Filter)" 方法一致。
 
     Args:
         audio: 音訊數據
         sample_rate: 取樣率
         use_a_weighting: 是否應用 A加權 (IEC 61672-1)
-        n_fft: FFT 點數
+        filter_order: 濾波器階數 (IEC 61260 建議 6 階)
 
     Returns:
         Dict: 包含分析結果
             - nominal_freqs: 中心頻率列表 (List[float])
-            - band_levels: 各頻帶 dB 值 (List[float])
-            - raw_max: 未歸一化的最大 dB 值 (用於診斷)
+            - band_levels: 各頻帶 dB(SPL) 值 (List[float])
+            - method: 使用的分析方法
     """
+    from scipy.signal import butter, sosfilt
+    
     # 參數驗證
     try:
         sample_rate = float(sample_rate)
@@ -64,133 +66,94 @@ def compute_octave_bands(
 
     # 確保音訊為 float64
     audio = np.asarray(audio, dtype=np.float64).flatten()
-    n_samples = len(audio)
+    nyquist = sample_rate / 2
 
-    # 調整 n_fft (確保不過長)
-    hop_length = n_fft // 2
-    
-    if n_samples < n_fft:
-        n_fft = n_samples
-        hop_length = n_samples
-    
-    window = np.hanning(n_fft)
-    freqs = rfftfreq(n_fft, 1/sample_rate)
-    
-    # 計算 STFT Average Magnitude
-    # -----------------------------------------------------
-    n_frames = 1 + (n_samples - n_fft) // hop_length
-    if n_frames < 1: n_frames = 1
-    
-    mag_sum = np.zeros(len(freqs))
-    valid_frames = 0
-    
-    for i in range(n_frames):
-        start = i * hop_length
-        end = start + n_fft
-        
-        if end > n_samples: break
-             
-        frame = audio[start:end] * window
-        # FFT Magnitude: |X|/N * 2 (one-sided)
-        spec = np.abs(rfft(frame)) / n_fft
-        spec[1:-1] *= 2 
-        mag_sum += spec
-        valid_frames += 1
-        
-    if valid_frames > 0:
-        avg_mag = mag_sum / valid_frames
-    else:
-        padded = np.zeros(n_fft)
-        padded[:n_samples] = audio * np.hanning(n_samples)
-        avg_mag = np.abs(rfft(padded)) / n_fft
-        avg_mag[1:-1] *= 2
-
-    # A-weighting (IEC 61672-1)
-    # -----------------------------------------------------
-    def get_a_weighting_gain(f):
-        """計算 A-weighting 幅度增益 (linear gain)"""
-        f = np.array(f, dtype=float)
-        valid = f > 0
-        
-        f_val = f[valid]
-        f2 = f_val**2
-        
-        # Standard IEC formula applied to Magnitude (Numerator f^2)
-        # Result matches 12dB/octave slope at low freq
-        num = 12194**2 * f2
-        den = (f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2)
-        
-        mag_gain = num / den
-        
-        # Apply 2.0 dB normalization (gain at 1kHz = 0dB reference)
-        # 10^(2.0/20) = 1.2589
-        
-        full_gain = np.zeros_like(f)
-        full_gain[valid] = mag_gain * 1.258925
-        return full_gain
-
-    if use_a_weighting:
-        weighting = get_a_weighting_gain(freqs)
-        weighted_mag = avg_mag * weighting
-    else:
-        weighted_mag = avg_mag
-
-    # 1/3 Octave Band Integration
-    # -----------------------------------------------------
+    # IEC 61260-1:2014 標準 1/3 倍頻程中心頻率
+    # 完整的標稱頻率序列
     nominal_freqs = [
         12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250,
         315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000,
         5000, 6300, 8000, 10000, 12500, 16000, 20000
     ]
-    
-    G = 10 ** (3/10)
-    FRACTION = 3
-    nyquist = sample_rate / 2
-    
+
+    # IEC 61260 頻帶計算常數
+    G = 10 ** (3/10)  # Octave ratio = 10^(3/10) ≈ 1.9953
+    FRACTION = 3  # 1/3 octave
+
+    # A-weighting 查找表 (IEC 61672-1 at nominal frequencies)
+    a_weighting_table = {
+        12.5: -63.4, 16: -56.7, 20: -50.5, 25: -44.7, 31.5: -39.4,
+        40: -34.6, 50: -30.2, 63: -26.2, 80: -22.5, 100: -19.1,
+        125: -16.1, 160: -13.4, 200: -10.9, 250: -8.6, 315: -6.6,
+        400: -4.8, 500: -3.2, 630: -1.9, 800: -0.8, 1000: 0.0,
+        1250: 0.6, 1600: 1.0, 2000: 1.2, 2500: 1.3, 3150: 1.2,
+        4000: 1.0, 5000: 0.5, 6300: -0.1, 8000: -1.1, 10000: -2.5,
+        12500: -4.3, 16000: -6.6, 20000: -9.3
+    }
+
     band_levels = []
     processed_freqs = []
-    
+
     for fc in nominal_freqs:
-        # Band limits
-        factor = G ** (1 / (2 * FRACTION))
+        # 根據 IEC 61260-1 計算頻帶邊界
+        factor = G ** (1 / (2 * FRACTION))  # 約 1.122
         f_low = fc / factor
         f_high = fc * factor
-        effective_f_high = min(f_high, nyquist)
-        
-        val_to_append = -120.0
-        
-        # Cutoff handling
-        if f_low > nyquist:
+
+        # 檢查是否在有效範圍內
+        if f_low >= nyquist:
             band_levels.append(-120.0)
             processed_freqs.append(fc)
             continue
+
+        # 限制上限頻率在 Nyquist 以下
+        effective_f_high = min(f_high, nyquist * 0.95)
+        
+        # 確保帶寬有效
+        if effective_f_high <= f_low:
+            band_levels.append(-120.0)
+            processed_freqs.append(fc)
+            continue
+
+        try:
+            # 設計 Butterworth 帶通濾波器 (IEC 61260 建議 6 階)
+            # 使用 SOS (Second-Order Sections) 格式以提高穩定性
+            sos = butter(
+                filter_order,
+                [f_low / nyquist, effective_f_high / nyquist],
+                btype='bandpass',
+                output='sos'
+            )
+
+            # 濾波
+            filtered_audio = sosfilt(sos, audio)
+
+            # 計算 RMS 能量
+            rms = np.sqrt(np.mean(filtered_audio ** 2))
             
-        indices = np.where((freqs >= f_low) & (freqs < effective_f_high))[0]
-        
-        if len(indices) > 0:
-            # Energy = sum(mag^2)
-            band_energy = np.sum(weighted_mag[indices]**2)
-            if band_energy > 1e-20:
-                val_to_append = 10 * np.log10(band_energy)
-        elif f_low < nyquist:
-            # Interpolation
-            idx = np.abs(freqs - fc).argmin()
-            bin_width = sample_rate / n_fft
-            band_width = effective_f_high - f_low
-            scale = band_width / bin_width
-            band_energy = (weighted_mag[idx]**2) * scale
-            if band_energy > 1e-20:
-                val_to_append = 10 * np.log10(band_energy)
-                
-        band_levels.append(val_to_append)
+            # 轉換為 dB SPL
+            if rms > 1e-20:
+                level_db = 20 * np.log10(rms / REFERENCE_PRESSURE + EPSILON)
+            else:
+                level_db = -120.0
+
+            # 套用 A-weighting (如果需要)
+            if use_a_weighting:
+                a_weight = a_weighting_table.get(fc, 0.0)
+                level_db += a_weight
+
+            band_levels.append(round(level_db, 1))
+
+        except Exception as e:
+            # 濾波器設計失敗 (通常是極端頻率)
+            band_levels.append(-120.0)
+
         processed_freqs.append(fc)
-        
-    raw_max = max(band_levels) if band_levels else -120.0
-    
+
     return {
         "nominal_freqs": processed_freqs,
         "band_levels": band_levels,
-        "raw_max": raw_max
+        "method": "IEC 61260-1:2014 Filter Bank (6th order Butterworth)"
     }
 
 
@@ -231,7 +194,7 @@ def analyze_frequency_bands(
             # 濾波並計算能量
             filtered = bandpass_filter(audio, sample_rate, low, high)
             rms = calculate_rms(filtered)
-            energy_db = rms_to_db(rms, 1.0)
+            energy_db = rms_to_db(rms, REFERENCE_PRESSURE)
 
             # 確保有效值
             if not np.isfinite(energy_db):
@@ -268,7 +231,7 @@ def analyze_frequency_bands(
             bands_result[band_name]["percentage"] = round(percentage, 1)
 
         # 總能量 dB
-        total_energy_db = 10 * np.log10(total_energy_linear + 1e-10)
+        total_energy_db = 10 * np.log10(total_energy_linear / (REFERENCE_PRESSURE**2) + EPSILON)
     else:
         for band_name in band_names:
             bands_result[band_name]["percentage"] = 0.0
@@ -302,7 +265,7 @@ def calculate_band_energy(
     try:
         filtered = bandpass_filter(audio, sample_rate, low_freq, high_freq)
         rms = calculate_rms(filtered)
-        energy_db = rms_to_db(rms, 1.0)
+        energy_db = rms_to_db(rms, REFERENCE_PRESSURE)
 
         if not np.isfinite(energy_db):
             energy_db = -100.0
@@ -359,3 +322,66 @@ def get_band_characteristics(band_analysis: Dict[str, Any]) -> Dict[str, str]:
         "concerns": concerns if concerns else ["無明顯異常"],
         "recommendations": recommendations if recommendations else ["維持目前狀態"]
     }
+
+
+def apply_band_rejection(
+    audio: np.ndarray,
+    sample_rate: int,
+    removed_bands: List[float],
+    fraction: int = 3,
+    filter_order: int = 4
+) -> np.ndarray:
+    """應用多個帶阻濾波器移除指定頻帶"""
+    from scipy.signal import butter, sosfiltfilt
+    
+    if not removed_bands:
+        return audio
+        
+    # 複製避免修改原陣列
+    filtered_audio = audio.copy()
+    nyquist = sample_rate / 2
+    G = 10 ** (3/10)
+    
+    for fc in removed_bands:
+        try:
+            # 計算頻帶範圍 (1/3 Octave)
+            factor = G ** (1 / (2 * fraction))
+            f_low = fc / factor
+            f_high = fc * factor
+            
+            # 正規化頻率檢查
+            if f_low >= nyquist:
+                continue
+                
+            if f_high >= nyquist * 0.99:
+                # 情況 1: 上限超過 Nyquist -> 轉為低通濾波器 (保留 < f_low)
+                # 移除 [f_low, inf]
+                wn = min(0.99, f_low / nyquist)
+                sos = butter(filter_order, wn, btype='lowpass', output='sos')
+            elif f_low <= 0:
+                # 情況 2: 下限低於 0 -> 轉為高通濾波器 (保留 > f_high)
+                # 移除 [0, f_high]
+                wn = min(0.99, max(0.001, f_high / nyquist))
+                sos = butter(filter_order, wn, btype='highpass', output='sos')
+            else:
+                # 情況 3: 正常帶阻濾波器
+                wn_low = max(0.001, f_low / nyquist)
+                wn_high = min(0.99, f_high / nyquist)
+                
+                if wn_low >= wn_high: continue
+                
+                sos = butter(
+                    filter_order, 
+                    [wn_low, wn_high], 
+                    btype='bandstop', 
+                    output='sos'
+                )
+            
+            # 濾波 (零相位)
+            filtered_audio = sosfiltfilt(sos, filtered_audio)
+        except Exception as e:
+            # print(f"Filter error at {fc}Hz: {e}") # Debug
+            continue
+
+            
+    return filtered_audio

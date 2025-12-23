@@ -48,55 +48,53 @@ def design_a_weighting_filter(sample_rate: int) -> Tuple[np.ndarray, np.ndarray]
 
     Returns:
         Tuple[np.ndarray, np.ndarray]: (分子係數 b, 分母係數 a)
-
-    Note:
-        A-weighting 濾波器模擬人耳對不同頻率的敏感度，
-        在低頻和高頻處衰減，在 1-4 kHz 處增益最大。
     """
-    # A-weighting 濾波器的極點頻率 (Hz)
-    # 根據 IEC 61672-1 標準
+    # A-weighting 濾波器的極點頻率 (Hz) - IEC 61672-1
     f1 = 20.598997
     f2 = 107.65265
     f3 = 737.86223
     f4 = 12194.217
 
-    # 增益常數 (1 kHz 處增益為 0 dB)
-    A1000 = 1.9997
-
-    # 計算正規化角頻率
     pi = np.pi
+    
+    # 角頻率
+    w1 = 2 * pi * f1
+    w2 = 2 * pi * f2
+    w3 = 2 * pi * f3
+    w4 = 2 * pi * f4
 
-    # 類比濾波器的分子和分母係數
-    # A-weighting 濾波器傳遞函數的設計
-    # 使用二階區段 (Second-Order Sections) 實現
+    # A-weighting 傳遞函數 (類比):
+    # H(s) = K_A * w4^2 * s^4 / ((s+w1)^2 * (s+w2) * (s+w3) * (s+w4)^2)
+    
+    # 計算 1kHz 處的正規化常數
+    # 使 |H(j*2*pi*1000)| = 1.0
+    f_ref = 1000.0
+    w_ref = 2 * pi * f_ref
+    s = 1j * w_ref
+    
+    # 未正規化的傳遞函數 (使用 w4^2 * s^4 作為分子)
+    H_num_unnorm = (w4**2) * (s**4)
+    H_den = ((s + w1)**2) * (s + w2) * (s + w3) * ((s + w4)**2)
+    H_at_1k = H_num_unnorm / H_den
+    
+    # 計算增益常數 K_A
+    K_A = 1.0 / np.abs(H_at_1k)
 
-    # 類比原型濾波器
-    # H(s) = K * s^4 / ((s+ω1)^2 * (s+ω2) * (s+ω3) * (s+ω4)^2)
+    # 類比濾波器分子: K_A * w4^2 * s^4
+    # 在多項式係數表示中: [K_A * w4^2, 0, 0, 0, 0]
+    num_analog = np.array([K_A * (w4**2), 0, 0, 0, 0])
 
-    # 將類比濾波器轉換為數位濾波器
-    # 使用雙線性變換
-
-    # 預畸變頻率
-    Wc1 = 2 * pi * f1
-    Wc2 = 2 * pi * f2
-    Wc3 = 2 * pi * f3
-    Wc4 = 2 * pi * f4
-
-    # 類比濾波器的分子 (四個微分器)
-    num_analog = np.array([A1000 * Wc4**2, 0, 0, 0, 0])
-
-    # 類比濾波器的分母
-    # (s + Wc1)^2 * (s + Wc2) * (s + Wc3) * (s + Wc4)^2
-    den1 = np.convolve([1, Wc1], [1, Wc1])  # (s + Wc1)^2
-    den2 = [1, Wc2]  # (s + Wc2)
-    den3 = [1, Wc3]  # (s + Wc3)
-    den4 = np.convolve([1, Wc4], [1, Wc4])  # (s + Wc4)^2
+    # 類比濾波器分母: (s + w1)^2 * (s + w2) * (s + w3) * (s + w4)^2
+    den1 = np.convolve([1, w1], [1, w1])  # (s + w1)^2
+    den2 = [1, w2]
+    den3 = [1, w3]
+    den4 = np.convolve([1, w4], [1, w4])  # (s + w4)^2
 
     den_analog = np.convolve(den1, den2)
     den_analog = np.convolve(den_analog, den3)
     den_analog = np.convolve(den_analog, den4)
 
-    # 使用雙線性變換將類比濾波器轉換為數位濾波器
+    # 雙線性變換
     b, a = bilinear(num_analog, den_analog, sample_rate)
 
     return b, a
@@ -215,8 +213,8 @@ def calculate_frame_levels(
         end = start + frame_length
         frame = audio[start:end]
         rms = calculate_rms(frame)
-        # 使用 1.0 作為參考值計算相對 dB (dBFS)
-        frame_levels[i] = rms_to_db(rms, 1.0)
+        # 使用 REFERENCE_PRESSURE (20uPa) 計算絕對音壓級 (dB SPL)
+        frame_levels[i] = rms_to_db(rms, REFERENCE_PRESSURE)
 
     return frame_levels
 

@@ -34,3 +34,7 @@ acoustics>=0.2.6
 
 # Excel 報告生成
 openpyxl>=3.1.2
+
+# PDF 報告生成
+reportlab>=4.2.0
+kaleido>=0.2.1

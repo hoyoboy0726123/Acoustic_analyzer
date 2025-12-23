@@ -54,7 +54,29 @@ def create_interactive_spectrum(
     if freq_range is None:
         freq_range = (max(20, frequencies[0]), min(20000, frequencies[-1]))
 
-    # 設定布局 - 使用 closest 模式讓十字座標完整顯示
+    # 計算 Y 軸範圍（確保完整顯示，不會截斷峰值）
+    valid_mags = magnitudes[np.isfinite(magnitudes)]
+    if len(valid_mags) > 0:
+        # 計算 Y 軸範圍（確保完整顯示，不會截斷峰值）
+        # 改進：能夠適應濾波器產生的深谷 (Deep Notches)
+        y_max = np.max(valid_mags)
+        y_min_real = np.min(valid_mags)
+        
+        # 如果有極低值（如濾波後），確保顯示出來，但設定合理下限避免 -inf
+        # 一般聲學分析底限約 -100dB 到 -120dB
+        target_min = max(y_min_real, -120)
+        
+        # 上方留 10dB (或 20%) 空間
+        y_range = y_max - target_min
+        y_axis_max = y_max + max(10, y_range * 0.1)
+        
+        # 下方留 10dB (或 10%) 空間
+        y_axis_min = target_min - max(10, y_range * 0.1)
+    else:
+        y_axis_min = -50
+        y_axis_max = 50
+
+    # 設定布局
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, color='#333')),
         xaxis=dict(
@@ -66,23 +88,19 @@ def create_interactive_spectrum(
             tickformat='.0f',
             showspikes=True,
             spikemode='across',
-            spikesnap='cursor',
+            spikesnap='cursor',  # 垂直線跟著滑鼠
             spikecolor='red',
             spikethickness=1,
             spikedash='dot'
         ),
         yaxis=dict(
             title=ylabel,
+            range=[y_axis_min, y_axis_max],
             showgrid=show_grid,
             gridcolor='rgba(128, 128, 128, 0.3)',
-            showspikes=True,
-            spikemode='across',
-            spikesnap='cursor',
-            spikecolor='red',
-            spikethickness=1,
-            spikedash='dot'
+            showspikes=False  # 不需要 Y 軸 spike
         ),
-        hovermode='closest',  # 改用 closest 模式讓十字座標完整顯示
+        hovermode='x',  # 在任意 Y 位置都可觸發 hover
         dragmode='zoom',
         plot_bgcolor='white',
         paper_bgcolor='white',
@@ -90,6 +108,19 @@ def create_interactive_spectrum(
         modebar=dict(
             orientation='h',
             bgcolor='rgba(255,255,255,0.7)'
+        )
+    )
+    
+    # 設定緊湊的 hover 資訊
+    fig.update_traces(
+        hovertemplate='<b>%{x:.0f} Hz</b> | %{y:.1f} dB<extra></extra>'  # 緊湊格式：頻率 | dB
+    )
+    fig.update_layout(
+        hoverlabel=dict(
+            bgcolor='rgba(255,255,255,0.95)',
+            bordercolor='rgba(100,100,100,0.3)',
+            font_size=11,
+            font_family='Arial'
         )
     )
 
@@ -232,6 +263,7 @@ def create_spectrogram_interactive(
         y=frequencies,
         z=spectrogram_db,
         colorscale='Viridis',
+        # 自適應顏色範圍
         colorbar=dict(
             title=dict(text='幅度 (dB)', side='right')
         ),
@@ -444,7 +476,11 @@ def create_discrete_tone_chart(
     magnitudes: np.ndarray,
     tones: list,
     all_candidates: list = None,
-    title: str = "Discrete Tone 檢測結果"
+    title: str = "Discrete Tone 檢測結果",
+    use_a_weighting: bool = True,
+    ecma_standard: str = 'ECMA-74',
+    calibration_offset: float = 0.0,
+    freq_range: Tuple[float, float] = None
 ) -> go.Figure:
     """建立 Discrete Tone 視覺化圖表
 
@@ -452,20 +488,28 @@ def create_discrete_tone_chart(
 
     Args:
         frequencies: 頻率陣列 (Hz)
-        magnitudes: 能量陣列 (dB)
+        magnitudes: 能量陣列 (dB 或 dB(A))
         tones: 超過門檻的 Tone 列表
         all_candidates: 所有候選峰值列表
         title: 圖表標題
+        use_a_weighting: 是否使用 A-weighting (影響 Y 軸單位顯示)
+        ecma_standard: 使用的判定標準 (ECMA-74 或 ECMA-418)
+        calibration_offset: 校準偏移 (dB)
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
+    unit_label = "dB(A)" if use_a_weighting else "dB"
+    
+    # 套用校準偏移到頻譜
+    magnitudes_calibrated = magnitudes + calibration_offset
+    
     fig = go.Figure()
 
     # 繪製頻譜基線
     fig.add_trace(go.Scatter(
         x=frequencies,
-        y=magnitudes,
+        y=magnitudes_calibrated,
         mode='lines',
         name='頻譜',
         line=dict(color='#1f77b4', width=1),
@@ -474,11 +518,26 @@ def create_discrete_tone_chart(
 
     # 標記所有候選峰值 (灰色三角形)
     if all_candidates:
-        candidate_freqs = [t.get('frequency', 0) for t in all_candidates if not t.get('exceeds_threshold', False)]
-        candidate_mags = [t.get('magnitude_db', 0) for t in all_candidates if not t.get('exceeds_threshold', False)]
-        candidate_proms = [t.get('prominence', 0) for t in all_candidates if not t.get('exceeds_threshold', False)]
+        # 過濾未超過門檻的候選
+        non_exceeding = [t for t in all_candidates if not t.get('exceeds_threshold', False)]
         
-        if candidate_freqs:
+        if non_exceeding:
+            candidate_freqs = [t.get('frequency', 0) for t in non_exceeding]
+            # 套用校準偏移到候選峰值
+            candidate_mags = [t.get('magnitude_db', 0) + calibration_offset for t in non_exceeding]
+            
+            # 建立完整的 hover 資訊（顯示校準後數值）
+            hover_texts = [
+                f"候選峰值<br>"
+                f"<b>頻率: {t.get('frequency', 0):.1f} Hz</b><br>"
+                f"幅度: {t.get('magnitude_db', 0) + calibration_offset:.1f} dB<br>"
+                f"───────────<br>"
+                f"PR: {t.get('prominence', 0):.1f} dB (門檻: {t.get('pr_threshold', 0):.1f})<br>"
+                f"TNR: {t.get('tnr', 0):.1f} dB (門檻: {t.get('tnr_threshold', 0):.1f})<br>"
+                f"頻帶: {t.get('band', 'N/A')}"
+                for t in non_exceeding
+            ]
+            
             fig.add_trace(go.Scatter(
                 x=candidate_freqs,
                 y=candidate_mags,
@@ -490,26 +549,35 @@ def create_discrete_tone_chart(
                     color='gray',
                     line=dict(color='darkgray', width=1)
                 ),
-                hovertemplate='候選峰值<br>頻率: %{x:.1f} Hz<br>幅度: %{y:.1f} dB<br>突出量: %{customdata:.1f} dB<extra></extra>',
-                customdata=candidate_proms
+                hovertemplate='%{customdata}<extra></extra>',
+                customdata=hover_texts
             ))
 
     # 標記超過門檻的 Discrete Tone (紅色星形)
     if tones:
         tone_freqs = [t.get('frequency', 0) for t in tones]
-        tone_mags = [t.get('magnitude_db', 0) for t in tones]
+        # 套用校準偏移到 Discrete Tone
+        tone_mags = [t.get('magnitude_db', 0) + calibration_offset for t in tones]
         tone_proms = [t.get('prominence', 0) for t in tones]
-        tone_thresholds = [t.get('threshold', 0) for t in tones]
+        tone_tnrs = [t.get('tnr', 0) for t in tones]
+        tone_pr_thresholds = [t.get('pr_threshold', t.get('threshold', 0)) for t in tones]
+        tone_tnr_thresholds = [t.get('tnr_threshold', 0) for t in tones]
+        tone_methods = [t.get('method', 'PR') for t in tones]
         tone_bands = [t.get('band', 'N/A') for t in tones]
         
         hover_texts = [
-            f"⚠️ Discrete Tone<br>"
-            f"頻率: {f:.1f} Hz<br>"
+            f"⚠️ Discrete Tone 偵測<br>"
+            f"<b>頻率: {f:.1f} Hz</b><br>"
             f"幅度: {m:.1f} dB<br>"
-            f"突出量: {p:.1f} dB<br>"
-            f"門檻: {th:.1f} dB<br>"
+            f"───────────<br>"
+            f"PR (ΔLp): {p:.1f} dB (門檻: {pth:.1f})<br>"
+            f"TNR (ΔLt): {tnr:.1f} dB (門檻: {tth:.1f})<br>"
+            f"判定方法: {method}<br>"
             f"頻帶: {b}"
-            for f, m, p, th, b in zip(tone_freqs, tone_mags, tone_proms, tone_thresholds, tone_bands)
+            for f, m, p, tnr, pth, tth, method, b in zip(
+                tone_freqs, tone_mags, tone_proms, tone_tnrs, 
+                tone_pr_thresholds, tone_tnr_thresholds, tone_methods, tone_bands
+            )
         ]
         
         fig.add_trace(go.Scatter(
@@ -529,15 +597,22 @@ def create_discrete_tone_chart(
             hovertemplate='%{customdata}<extra></extra>',
             customdata=hover_texts
         ))
-
-    # ECMA-74 門檻區域標示
-    ecma_bands = [
-        (89.1, 282, 8, '89-282Hz: >8dB'),
-        (282, 893, 5, '282-893Hz: >5dB'),
-        (893, 11200, 3, '893-11.2kHz: >3dB')
-    ]
-    
-    colors = ['rgba(255,0,0,0.05)', 'rgba(255,165,0,0.05)', 'rgba(255,255,0,0.05)']
+    # 門檻區域標示 (根據選擇的標準)
+    if ecma_standard == 'ECMA-418':
+        # ECMA-418-1: PR 門檻由公式計算
+        ecma_bands = [
+            (89.1, 1000, None, '<1kHz: >9+10×log₁₀(1000/f) dB'),
+            (1000, 11220, 9, '≥1kHz: >9 dB')
+        ]
+        colors = ['rgba(255,100,100,0.08)', 'rgba(255,200,100,0.08)']
+    else:
+        # ECMA-74: 固定頻帶門檻
+        ecma_bands = [
+            (89.1, 282, 8, '89-282Hz: >8dB'),
+            (282, 893, 5, '282-893Hz: >5dB'),
+            (893, 11200, 3, '893-11.2kHz: >3dB')
+        ]
+        colors = ['rgba(255,0,0,0.05)', 'rgba(255,165,0,0.05)', 'rgba(255,255,0,0.05)']
     
     for i, (low, high, threshold, label) in enumerate(ecma_bands):
         fig.add_vrect(
@@ -550,36 +625,34 @@ def create_discrete_tone_chart(
         fig.add_trace(go.Scatter(
             x=[None], y=[None],
             mode='markers',
-            name=f'{label}',
-            marker=dict(size=10, color=colors[i].replace('0.05', '0.3')),
+            name=f'PR {label}',
+            marker=dict(size=10, color=colors[i].replace('0.05', '0.3').replace('0.08', '0.4')),
             showlegend=True
         ))
+
+    if freq_range is None:
+        freq_range = (50, 15000)
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, color='#333')),
         xaxis=dict(
             title='頻率 (Hz)',
             type='log',
-            range=[np.log10(50), np.log10(15000)],
+            range=[np.log10(max(20, freq_range[0])), np.log10(freq_range[1])],
             showgrid=True,
             gridcolor='rgba(128, 128, 128, 0.3)',
             showspikes=True,
             spikemode='across',
-            spikesnap='cursor',
+            spikesnap='cursor',  # 垂直線跟著滑鼠
             spikecolor='red',
             spikethickness=1,
             spikedash='dot'
         ),
         yaxis=dict(
-            title='幅度 (dB)',
+            title=f'幅度 ({unit_label})',
             showgrid=True,
             gridcolor='rgba(128, 128, 128, 0.3)',
-            showspikes=True,
-            spikemode='across',
-            spikesnap='cursor',
-            spikecolor='red',
-            spikethickness=1,
-            spikedash='dot'
+            showspikes=False
         ),
         legend=dict(
             orientation='h',
@@ -588,12 +661,19 @@ def create_discrete_tone_chart(
             xanchor='right',
             x=1
         ),
-        hovermode='closest',
+        hovermode='x',  # 在任意 Y 位置都可觸發 hover
+        hoverlabel=dict(
+            bgcolor='rgba(255,255,255,0.95)',
+            bordercolor='rgba(100,100,100,0.3)',
+            font_size=11
+        ),
         dragmode='zoom',
         plot_bgcolor='white',
         paper_bgcolor='white',
         margin=dict(l=60, r=40, t=80, b=60)
     )
+    
+    # Discrete Tone 圖表的各 trace 已有獨立的 hovertemplate，不需統一設定
 
     return fig
 
@@ -794,7 +874,11 @@ def create_spectrogram_chart(
     title: str = "頻譜瀑布圖 (Spectrogram)",
     fmax: int = 20000,
     n_fft: int = 2048,
-    hop_length: int = 512
+    hop_length: int = 512,
+    use_a_weighting: bool = True,
+    z_range: tuple = None,
+    calibration_offset: float = 0.0,
+    spl_offset: float = 0.0
 ) -> go.Figure:
     """建立互動式 Spectrogram
 
@@ -805,38 +889,68 @@ def create_spectrogram_chart(
         fmax: 最大顯示頻率 (Hz)
         n_fft: FFT 視窗大小
         hop_length: 跳躍長度
+        use_a_weighting: 是否套用 A-weighting
+        z_range: 手動設定色彩範圍 (z_min, z_max)，None 表示自動
+        calibration_offset: 麥克風校準偏移 (dB)
+        spl_offset: dB SPL 絕對模式偏移 (dB)
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
     from scipy.signal import spectrogram as scipy_spectrogram
+    from core.noise_level import apply_a_weighting
+
+    
+    # 如果啟用 A-weighting，先對音訊套用
+    if use_a_weighting:
+        audio_processed = apply_a_weighting(audio, sample_rate)
+    else:
+        audio_processed = audio
     
     # 計算 Spectrogram
     frequencies, times, Sxx = scipy_spectrogram(
-        audio, fs=sample_rate,
+        audio_processed, fs=sample_rate,
         nperseg=n_fft, noverlap=n_fft - hop_length
     )
     
-    # 轉換為 dB
+    # 轉換為 dB (相對功率)
+    # 使用 10*log10 因為 Sxx 是功率譜密度
     Sxx_db = 10 * np.log10(Sxx + 1e-10)
+    
+    # 套用校準偏移（麥克風校準 + SPL 模式偏移）
+    total_offset = calibration_offset + spl_offset
+    Sxx_db = Sxx_db + total_offset
     
     # 限制頻率範圍
     freq_mask = frequencies <= min(fmax, sample_rate / 2)
     frequencies = frequencies[freq_mask]
     Sxx_db = Sxx_db[freq_mask, :]
+    
+    # 動態單位標籤
+    unit_label = "dB(A)" if use_a_weighting else "dB"
+    if spl_offset > 0:
+        unit_label += " SPL"
 
     fig = go.Figure()
 
-    fig.add_trace(go.Heatmap(
+    # 色彩範圍設定
+    heatmap_kwargs = dict(
         x=times,
         y=frequencies,
         z=Sxx_db,
         colorscale='Viridis',
         colorbar=dict(
-            title=dict(text='幅度 (dB)', side='right')
+            title=dict(text=f'幅度 ({unit_label})', side='right')
         ),
-        hovertemplate='時間: %{x:.2f}s<br>頻率: %{y:.0f} Hz<br>幅度: %{z:.1f} dB<extra></extra>'
-    ))
+        hovertemplate=f'時間: %{{x:.2f}}s<br>頻率: %{{y:.0f}} Hz<br>幅度: %{{z:.1f}} {unit_label}<extra></extra>'
+    )
+    
+    # 只在手動模式下設定 zmin/zmax，否則讓 Plotly 自動計算（與播放器一致）
+    if z_range is not None:
+        heatmap_kwargs['zmin'] = z_range[0]
+        heatmap_kwargs['zmax'] = z_range[1]
+
+    fig.add_trace(go.Heatmap(**heatmap_kwargs))
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, color='#333')),
@@ -966,155 +1080,36 @@ def create_octave_band_chart(
     audio: np.ndarray,
     sample_rate: int,
     title: str = "1/3 倍頻程分析",
-    use_a_weighting: bool = True
+    use_a_weighting: bool = True,
+    calibration_offset: float = 0.0
 ) -> go.Figure:
     """建立 1/3 倍頻程分析圖
 
-    使用 FFT 合成法 (FFT Synthesis) 實現 IEC 61260-1:2014 標準。
-    此方法在全頻帶上都非常穩定，特別是高頻部分。
+    使用 IEC 61260-1:2014 標準的 Butterworth 濾波器組實現。
+    與 HEAD acoustics ArtemiS SUITE 的 "1/n Octave (Filter)" 方法一致。
 
     Args:
         audio: 音訊資料
         sample_rate: 取樣率 (Hz)
         title: 圖表標題
         use_a_weighting: 是否套用 A-weighting (預設 True)
+        calibration_offset: 校準偏移值 (dB)
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
-    from scipy.fft import rfft, rfftfreq
-
-    # 完全複製 STFT Average 邏輯 (Manual STFT Implementation)
+    # 使用 compute_octave_bands 函數 (IEC 61260 濾波器法)
+    octave_data = compute_octave_bands(audio, sample_rate, use_a_weighting=use_a_weighting)
     
-    from scipy.fft import rfft, rfftfreq
-    
-    # 參數驗證與強制轉型
-    try:
-        sample_rate = float(sample_rate)
-        if sample_rate <= 0: raise ValueError
-    except:
-        sample_rate = 48000.0  # Fallback
-        
-    # 確保音訊為 float64
-    audio = np.asarray(audio, dtype=np.float64).flatten()
-    n_samples = len(audio)
-    
-    n_fft = 16384
-    hop_length = n_fft // 2
-    
-    if n_samples < n_fft:
-        n_fft = n_samples
-        hop_length = n_samples
-    
-    window = np.hanning(n_fft)
-    freqs = rfftfreq(n_fft, 1/sample_rate)
-    
-    n_frames = 1 + (n_samples - n_fft) // hop_length
-    if n_frames < 1: n_frames = 1
-    
-    mag_sum = np.zeros(len(freqs))
-    valid_frames = 0
-    
-    for i in range(n_frames):
-        start = i * hop_length
-        end = start + n_fft
-        
-        if end > n_samples: break
-             
-        frame = audio[start:end] * window
-        spec = np.abs(rfft(frame)) / n_fft
-        spec[1:-1] *= 2 
-        mag_sum += spec
-        valid_frames += 1
-        
-    if valid_frames > 0:
-        avg_mag = mag_sum / valid_frames
-    else:
-        padded = np.zeros(n_fft)
-        padded[:n_samples] = audio * np.hanning(n_samples)
-        avg_mag = np.abs(rfft(padded)) / n_fft
-        avg_mag[1:-1] *= 2
-
-    # A-weighting
-    def get_a_weighting(f):
-        f = np.array(f, dtype=float)
-        valid = f > 0
-        result = np.zeros_like(f)
-        f_val = f[valid]
-        f2 = f_val**2
-        const = 12194**2 * f_val**2  # 修正公式 (分子是 f^4, 但在 magnitude domain 開根號後是 f^2 ?)
-        # A-weighting 標準公式是用 Power (dB = 20log...), 所以 Magnitude 應該直接套用
-        # Ra(f) 的分子是 12194^2 * f^4
-        # 所以 Magnitude Gain = sqrt(Ra(f)) ??
-        # 不，standard formula returns dB. We use 10^(dB/20) for magnitude gain.
-        const = 12194**2 * f_val**4
-        div = (f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12194**2)
-        result[valid] = 20 * np.log10(const / div + 1e-10) + 2.0
-        return result
-
-    nominal_freqs = [
-        12.5, 16, 20, 25, 31.5, 40, 50, 63, 80, 100, 125, 160, 200, 250,
-        315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000,
-        5000, 6300, 8000, 10000, 12500, 16000, 20000
-    ]
-    
-    G = 10 ** (3/10)
-    FRACTION = 3
-    
-    band_levels = []
-    processed_freqs = []
-    
-    if use_a_weighting:
-        a_weight_db = get_a_weighting(freqs)
-        a_weight_linear = 10 ** (a_weight_db / 20)
-        weighted_mag = avg_mag * a_weight_linear
-    else:
-        weighted_mag = avg_mag
-        
-    nyquist = sample_rate / 2
-    
-    for fc in nominal_freqs:
-        factor = G ** (1 / (2 * FRACTION))
-        f_low = fc / factor
-        f_high = fc * factor
-        effective_f_high = min(f_high, nyquist)
-        
-        # 即使超過 Nyquist，我們也強制計算(會有空值)以保留 X 軸位置
-        
-        indices = np.where((freqs >= f_low) & (freqs < effective_f_high))[0]
-        
-        val_to_append = -120.0
-        
-        if len(indices) > 0:
-            band_energy = np.sum(weighted_mag[indices]**2)
-            if band_energy > 1e-20:
-                val_to_append = 10 * np.log10(band_energy)
-        elif f_low < nyquist:
-            # Interpolation only if within Nyquist range
-            idx = np.abs(freqs - fc).argmin()
-            bin_width = sample_rate / n_fft
-            band_width = effective_f_high - f_low
-            scale = band_width / bin_width
-            band_energy = (weighted_mag[idx]**2) * scale
-            if band_energy > 1e-20:
-                val_to_append = 10 * np.log10(band_energy)
-                
-        band_levels.append(val_to_append)
-        processed_freqs.append(fc)
-
-    # 正規化
-    raw_max = max(band_levels) if band_levels else -120
-    offset = 0
-    if band_levels:
-        max_level = max(band_levels)
-        if max_level < 0:
-             offset = 5 - max_level
-             band_levels = [level + offset for level in band_levels]
+    nominal_freqs = octave_data["nominal_freqs"]
+    # 套用校準偏移
+    band_levels = [level + calibration_offset for level in octave_data["band_levels"]]
+    method = octave_data.get("method", "IEC 61260-1:2014 Filter Bank")
     
     unit_label = "dB(A)" if use_a_weighting else "dB"
     
     # 建構 X 軸標籤列表
-    x_labels = [f'{int(f)}' if f < 1000 else f'{f/1000:.1f}k' for f in processed_freqs]
+    x_labels = [f'{int(f)}' if f < 1000 else f'{f/1000:.1f}k' for f in nominal_freqs]
     
     fig = go.Figure()
 
@@ -1124,19 +1119,21 @@ def create_octave_band_chart(
         marker_color='#2ecc71',
         marker_line=dict(color='#1e8449', width=1),
         hovertemplate='頻率: %{customdata:.0f} Hz<br>Level: %{y:.1f} ' + unit_label + '<extra></extra>',
-        customdata=processed_freqs,
+        customdata=nominal_freqs,
         # 只顯示 > -50 dB 的數值，避免畫面過於雜亂
         text=[f"{y:.1f}" if y > -50 else "" for y in band_levels], 
         textposition='auto',
         textfont=dict(size=10)
     ))
     
-    # 圖表標題
+    # 圖表標題（包含校準標記）
+    cal_note = f" (Cal: {calibration_offset:+.1f}dB)" if calibration_offset != 0 else ""
+    
     fig.update_layout(
         title=dict(text=f"{title} ({unit_label})", font=dict(size=16, color='#333')),
         annotations=[
             dict(
-                text=f"Sample Rate: {sample_rate:.0f}Hz | Method: FFT Synthesis (STFT Avg)",
+                text=f"Sample Rate: {sample_rate:.0f}Hz | Method: {method}{cal_note}",
                 xref="paper", yref="paper",
                 x=1.0, y=1.05,
                 showarrow=False,
@@ -1154,8 +1151,7 @@ def create_octave_band_chart(
         yaxis=dict(
             title=f'L(A) {unit_label}' if use_a_weighting else f'Level ({unit_label})',
             showgrid=True,
-            gridcolor='rgba(128, 128, 128, 0.3)',
-            range=[-100, 20]
+            gridcolor='rgba(128, 128, 128, 0.3)'
         ),
         dragmode='zoom',
         plot_bgcolor='white',
@@ -1174,7 +1170,10 @@ def create_waterfall_3d_chart(
     fmax: int = 10000,
     n_fft: int = 2048,
     hop_length: int = 1024,
-    n_time_slices: int = 50
+    n_time_slices: int = 50,
+    use_a_weighting: bool = True,
+    calibration_offset: float = 0.0,
+    spl_offset: float = 0.0
 ) -> go.Figure:
     """建立 3D Waterfall 頻譜圖
 
@@ -1188,20 +1187,34 @@ def create_waterfall_3d_chart(
         n_fft: FFT 視窗大小
         hop_length: 跳躍長度
         n_time_slices: 時間切片數量
+        use_a_weighting: 是否套用 A-weighting
+        calibration_offset: 麥克風校準偏移 (dB)
+        spl_offset: dB SPL 模式偏移 (dB)
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
     from scipy.signal import spectrogram as scipy_spectrogram
+    from core.noise_level import apply_a_weighting
+    
+    # 如果啟用 A-weighting，先對音訊套用
+    if use_a_weighting:
+        audio_processed = apply_a_weighting(audio, sample_rate)
+    else:
+        audio_processed = audio
     
     # 計算 Spectrogram
     frequencies, times, Sxx = scipy_spectrogram(
-        audio, fs=sample_rate,
+        audio_processed, fs=sample_rate,
         nperseg=n_fft, noverlap=n_fft - hop_length
     )
     
     # 轉換為 dB
     Sxx_db = 10 * np.log10(Sxx + 1e-10)
+    
+    # 套用校準偏移（麥克風校準 + SPL 模式偏移）
+    total_offset = calibration_offset + spl_offset
+    Sxx_db = Sxx_db + total_offset
     
     # 限制頻率範圍
     freq_mask = frequencies <= min(fmax, sample_rate / 2)
@@ -1212,6 +1225,11 @@ def create_waterfall_3d_chart(
     time_step = max(1, len(times) // n_time_slices)
     times_sub = times[::time_step]
     Sxx_db_sub = Sxx_db[:, ::time_step]
+    
+    # 動態單位標籤
+    unit_label = "dB(A)" if use_a_weighting else "dB"
+    if spl_offset > 0:
+        unit_label += " SPL"
 
     fig = go.Figure()
 
@@ -1222,10 +1240,10 @@ def create_waterfall_3d_chart(
         z=Sxx_db_sub,
         colorscale='Viridis',
         colorbar=dict(
-            title=dict(text='幅度 (dB)', side='right'),
+            title=dict(text=f'幅度 ({unit_label})', side='right'),
             len=0.5
         ),
-        hovertemplate='時間: %{x:.2f}s<br>頻率: %{y:.0f} Hz<br>幅度: %{z:.1f} dB<extra></extra>'
+        hovertemplate=f'時間: %{{x:.2f}}s<br>頻率: %{{y:.0f}} Hz<br>幅度: %{{z:.1f}} {unit_label}<extra></extra>'
     ))
 
     fig.update_layout(
@@ -1233,7 +1251,7 @@ def create_waterfall_3d_chart(
         scene=dict(
             xaxis=dict(title='時間 (秒)'),
             yaxis=dict(title='頻率 (Hz)', type='log'),
-            zaxis=dict(title='幅度 (dB)'),
+            zaxis=dict(title=f'幅度 ({unit_label})'),
             camera=dict(
                 eye=dict(x=1.5, y=-1.5, z=0.8)
             )
@@ -1250,11 +1268,16 @@ def create_combined_analysis_chart(
     sample_rate: int,
     frequencies: np.ndarray,
     magnitudes: np.ndarray,
-    title: str = "綜合分析視圖"
+    title: str = "綜合分析視圖",
+    calibration_offset: float = 0.0,
+    spl_offset: float = 0.0,
+    z_range: Tuple[float, float] = None,
+    use_a_weighting: bool = True,
+    smooth_window: int = 10
 ) -> go.Figure:
     """建立綜合分析視圖 (2x2 子圖)
 
-    同時顯示波形、頻譜、Spectrogram 和 1/3 倍頻程。
+    同時顯示 Level vs Time、FFT 頻譜、Spectrogram 和 1/3 倍頻程。
 
     Args:
         audio: 音訊資料
@@ -1262,110 +1285,433 @@ def create_combined_analysis_chart(
         frequencies: FFT 頻率陣列
         magnitudes: FFT 幅度陣列
         title: 圖表標題
+        calibration_offset: 校準偏移 (dB)
+        spl_offset: Spectrogram SPL 偏移 (dB)
+        z_range: Spectrogram 顯示範圍 (min_db, max_db)
+        use_a_weighting: 是否套用 A-weighting
+        smooth_window: Level vs Time 平滑視窗大小
 
     Returns:
         go.Figure: Plotly 圖表物件
     """
     from scipy.signal import spectrogram as scipy_spectrogram
+    from core.band_analyzer import compute_octave_bands
+    from core.noise_level import apply_a_weighting as apply_a_wt
     
-    # 建立 2x2 子圖
+    # 建立 2x2 子圖 - 增加間距
     fig = make_subplots(
         rows=2, cols=2,
-        subplot_titles=('波形圖', 'FFT 頻譜', 'Spectrogram', '頻帶能量'),
+        subplot_titles=('Level vs Time', 'FFT 頻譜', 'Spectrogram', '1/3 倍頻程'),
         specs=[
             [{"type": "scatter"}, {"type": "scatter"}],
             [{"type": "heatmap"}, {"type": "bar"}]
         ],
-        vertical_spacing=0.12,
-        horizontal_spacing=0.08
+        vertical_spacing=0.18,
+        horizontal_spacing=0.12
     )
 
-    # 1. 波形圖 (降低取樣)
-    duration = len(audio) / sample_rate
-    step = max(1, len(audio) // 2000)
-    time = np.linspace(0, duration, len(audio[::step]))
+    # 1. Level vs Time
+    from core.noise_level import calculate_frame_levels
+    
+    frame_length = 4096 
+    
+    # 計算每幀的音壓級 (含 A-weighting)
+    frame_levels = calculate_frame_levels(audio, sample_rate, frame_length, apply_weighting=True)
+    
+    # 套用校準偏移
+    frame_levels = frame_levels + calibration_offset
+    
+    # 計算時間軸
+    n_frames = len(frame_levels)
+    times_lv = np.arange(n_frames) * frame_length / sample_rate
+    
+    # 平滑處理
+    if smooth_window > 1:
+        kernel = np.ones(smooth_window) / smooth_window
+        frame_levels = np.convolve(frame_levels, kernel, mode='same')
+    
+    # 降低資料點數量
+    step = max(1, len(times_lv) // 500)
+    times_lv = times_lv[::step]
+    levels_lv = frame_levels[::step]
     
     fig.add_trace(
         go.Scatter(
-            x=time, y=audio[::step],
-            mode='lines', name='波形',
-            line=dict(color='#1f77b4', width=0.5)
+            x=times_lv, y=levels_lv,
+            mode='lines', name='Level',
+            line=dict(color='#2ca02c', width=1),
+            hovertemplate='<b>%{x:.1f}s</b> | %{y:.1f} dBA<extra></extra>'
         ),
         row=1, col=1
     )
 
-    # 2. FFT 頻譜
+    # 2. FFT 頻譜 (需套用校準偏移)
+    # 這裡的 magnitudes 已經是 dB 了，直接加上 offset
+    calibrated_magnitudes = magnitudes + calibration_offset
+    
     fig.add_trace(
         go.Scatter(
-            x=frequencies, y=magnitudes,
+            x=frequencies, y=calibrated_magnitudes,
             mode='lines', name='頻譜',
-            line=dict(color='#ff7f0e', width=1)
+            line=dict(color='#ff7f0e', width=1),
+            hovertemplate='<b>%{x:.1f} Hz</b> | %{y:.1f} dB<extra></extra>'
         ),
         row=1, col=2
     )
 
-    # 3. Spectrogram
+    # 3. Spectrogram (需套用 calibration_offset + spl_offset)
+    # 如果啟用 A-weighting，先對音訊套用
+    if use_a_weighting:
+        audio_spec = apply_a_wt(audio, sample_rate)
+    else:
+        audio_spec = audio
+
+    # 使用與 create_spectrogram_chart 相同的參數
+    n_fft = 2048
+    hop_length = 512
     freq_spec, times_spec, Sxx = scipy_spectrogram(
-        audio, fs=sample_rate, nperseg=1024, noverlap=512
+        audio_spec, fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop_length
     )
     Sxx_db = 10 * np.log10(Sxx + 1e-10)
+    
+    # 套用偏移
+    total_offset = calibration_offset + spl_offset
+    Sxx_db += total_offset
+    
     freq_mask = freq_spec <= 10000
     
+    zmin, zmax = None, None
+    if z_range:
+        zmin, zmax = z_range
+        
     fig.add_trace(
         go.Heatmap(
             x=times_spec,
             y=freq_spec[freq_mask],
             z=Sxx_db[freq_mask, :],
             colorscale='Viridis',
-            showscale=False
+            showscale=False,
+            zmin=zmin,
+            zmax=zmax,
+            hovertemplate='時間: %{x:.2f}s<br>頻率: %{y:.0f}Hz<br>強度: %{z:.1f} dB<extra></extra>'
         ),
         row=2, col=1
     )
 
-    # 4. 簡化頻帶能量
-    bands = ['低頻', '中頻', '中高頻', '高頻', '超高頻']
-    band_ranges = [(20, 500), (500, 2000), (2000, 6000), (6000, 12000), (12000, 20000)]
-    energies = []
+    # 4. 1/3 倍頻程分析
+    octave_result = compute_octave_bands(audio, sample_rate)
+    center_freqs = octave_result['nominal_freqs']
+    band_levels = octave_result['band_levels']
     
-    for low, high in band_ranges:
-        mask = (frequencies >= low) & (frequencies <= high)
-        if np.any(mask):
-            # 將 dB 轉回線性計算平均
-            linear = 10 ** (magnitudes[mask] / 20)
-            avg_db = 20 * np.log10(np.mean(linear) + 1e-10)
-            energies.append(avg_db)
+    # 過濾掉無效的頻帶（-120 dB 表示無法計算），並加上校準偏移
+    valid_indices = [i for i, level in enumerate(band_levels) if level > -100]
+    center_freqs = [center_freqs[i] for i in valid_indices]
+    
+    # 加上校準偏移
+    band_levels = [band_levels[i] + calibration_offset for i in valid_indices]
+    
+    # 生成頻率標籤（簡化高頻標籤）
+    freq_labels = []
+    for f in center_freqs:
+        if f >= 1000:
+            freq_labels.append(f"{f/1000:.0f}k" if f % 1000 == 0 else f"{f/1000:.1f}k")
         else:
-            energies.append(-100)
-
+            freq_labels.append(f"{int(f)}")
+    
+    # 使用漸層色彩
+    n_bands = len(center_freqs)
+    colors = [f'hsl({i * 360 / n_bands}, 70%, 50%)' for i in range(n_bands)]
+    
     fig.add_trace(
         go.Bar(
-            x=bands, y=energies,
-            marker_color=['#3498db', '#2ecc71', '#f1c40f', '#e74c3c', '#9b59b6']
+            x=list(range(len(freq_labels))),  # 使用數字索引
+            y=band_levels,
+            marker_color=colors,
+            text=freq_labels,  # 顯示頻率標籤
+            textposition='none',
+            hovertemplate='<b>%{text}</b><br>%{y:.1f} dB(A)<extra></extra>'
         ),
         row=2, col=2
     )
 
     # 更新軸設定
-    fig.update_xaxes(title_text='時間 (秒)', row=1, col=1)
-    fig.update_yaxes(title_text='振幅', row=1, col=1)
     
-    fig.update_xaxes(title_text='頻率 (Hz)', type='log', row=1, col=2)
-    fig.update_yaxes(title_text='幅度 (dB)', row=1, col=2)
+    # 1. Level vs Time (Row 1, Col 1)
+    fig.update_xaxes(
+        title_text='時間 (秒)', 
+        row=1, col=1,
+        matches='x3'  # 與 Spectrogram (Row 2, Col 1) 共用 X 軸縮放
+    )
+    fig.update_yaxes(title_text='音壓級 (dBA)', row=1, col=1, fixedrange=False)
     
-    fig.update_xaxes(title_text='時間 (秒)', row=2, col=1)
-    fig.update_yaxes(title_text='頻率 (Hz)', row=2, col=1)
+    # 2. FFT 頻譜 (Row 1, Col 2)
+    fig.update_xaxes(
+        title_text='頻率 (Hz)', 
+        type='log', 
+        row=1, col=2,
+        showspikes=True,
+        spikemode='across',
+        spikesnap='cursor',
+        spikecolor='red',
+        spikethickness=1,
+        spikedash='dot',
+        fixedrange=False
+    )
+    fig.update_yaxes(title_text='幅度 (dB)', row=1, col=2, fixedrange=False)
     
-    fig.update_xaxes(title_text='頻帶', row=2, col=2)
-    fig.update_yaxes(title_text='能量 (dB)', row=2, col=2)
+    # 3. Spectrogram (Row 2, Col 1)
+    fig.update_xaxes(
+        title_text='時間 (秒)', 
+        row=2, col=1,
+        matches='x1'  # 與 Level vs Time (Row 1, Col 1) 共用 X 軸縮放
+    )
+    
+    # 設定 Y 軸為對數刻度，並設定範圍
+    log_range = [np.log10(20), np.log10(sample_rate / 2)]
+    
+    fig.update_yaxes(
+        title_text='頻率 (Hz)', 
+        type='log',
+        range=log_range,
+        row=2, col=1, 
+        fixedrange=False
+    )
+    
+    # 4. 1/3 倍頻程 (Row 2, Col 2) - 維持固定 (不可縮放)
+    fig.update_xaxes(
+        title_text='中心頻率', 
+        tickangle=-45,
+        tickmode='array',
+        tickvals=list(range(len(freq_labels))),
+        ticktext=freq_labels,
+        type='category',
+        row=2, col=2,
+        fixedrange=True
+    )
+    fig.update_yaxes(title_text='能量 (dB(A))', row=2, col=2, fixedrange=True)
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, color='#333')),
         showlegend=False,
+        dragmode='zoom',  # 預設啟用縮放工具
+        hovermode='closest',
         plot_bgcolor='white',
         paper_bgcolor='white',
         margin=dict(l=60, r=40, t=80, b=60),
-        height=700
+        height=750
     )
 
     return fig
 
+
+def create_level_vs_time_chart(
+    audio: np.ndarray,
+    sample_rate: int,
+    frame_length: int = 4096,
+    smooth_window: int = 5,
+    title: str = "Level vs Time (dBA)",
+    leq: float = None,
+    calibration_offset: float = 0.0,
+    use_a_weighting: bool = True  # 新增參數
+) -> go.Figure:
+    """建立時間對應音壓級圖表
+    
+    Args:
+        audio: 音訊資料
+        sample_rate: 取樣率 (Hz)
+        frame_length: 分析幀長度
+        smooth_window: 滑動平均窗口大小 (用於平滑曲線)
+        title: 圖表標題
+        leq: 總 Leq 值（已不再使用，保留參數兼容性）
+        calibration_offset: 校準偏移 (dB)
+        use_a_weighting: 是否套用 A-weighting
+    
+    Returns:
+        go.Figure: Plotly 圖表物件
+    """
+    from core.noise_level import calculate_frame_levels
+    
+    # 動態更新標題
+    if use_a_weighting:
+        ylabel = "L[A] dB(SPL)"
+        if "(dBA)" not in title and "(dB SPL)" not in title:
+           title = f"{title} (dBA)"
+    else:
+        ylabel = "L[Z] dB(SPL)"
+        title = title.replace("(dBA)", "(dB SPL)")
+    
+    # DEBUG: 顯示校準偏移
+    if calibration_offset != 0:
+        title += f" (Cal: +{calibration_offset:.1f}dB)"
+    
+    # 計算每幀的音壓級
+    frame_levels = calculate_frame_levels(audio, sample_rate, frame_length, apply_weighting=use_a_weighting)
+    
+    # 套用校準偏移
+    frame_levels = frame_levels + calibration_offset
+    
+    # 計算時間軸 (使用幀長度，因為 calculate_frame_levels 不重疊)
+    n_frames = len(frame_levels)
+    times = np.arange(n_frames) * frame_length / sample_rate
+    
+    # 滑動平均平滑處理
+    if smooth_window > 1 and len(frame_levels) > smooth_window:
+        kernel = np.ones(smooth_window) / smooth_window
+        frame_levels_smooth = np.convolve(frame_levels, kernel, mode='same')
+        # 處理邊緣效應
+        half_win = smooth_window // 2
+        frame_levels_smooth[:half_win] = frame_levels[:half_win]
+        frame_levels_smooth[-half_win:] = frame_levels[-half_win:]
+    else:
+        frame_levels_smooth = frame_levels
+    
+    # 計算 Y 軸範圍（自適應居中）
+    valid_levels = frame_levels_smooth[np.isfinite(frame_levels_smooth)]
+    if len(valid_levels) > 0:
+        y_min = np.min(valid_levels)
+        y_max = np.max(valid_levels)
+        y_range = y_max - y_min
+        # 增加上下 20% 的邊距
+        y_margin = max(y_range * 0.2, 2)  # 至少 2 dB 邊距
+        y_axis_min = y_min - y_margin
+        y_axis_max = y_max + y_margin
+    else:
+        y_axis_min = 0
+        y_axis_max = 100
+    
+    fig = go.Figure()
+    
+    # 繪製音壓級曲線（綠色，無填充）
+    fig.add_trace(go.Scatter(
+        x=times,
+        y=frame_levels_smooth,
+        mode='lines',
+        name=ylabel,
+        line=dict(color='#2ca02c', width=1.2),
+        hovertemplate=f'時間: %{{x:.2f}}s<br>{ylabel}: %{{y:.1f}} dB<extra></extra>'
+    ))
+    
+    # 設定布局（Y 軸自適應範圍）
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16, color='#333')),
+        xaxis=dict(
+            title='時間 (s)',
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor',
+            spikecolor='red',
+            spikethickness=1,
+            spikedash='dot'
+        ),
+        yaxis=dict(
+            title=ylabel,
+            range=[y_axis_min, y_axis_max],
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            showspikes=False
+        ),
+        hovermode='x',  # 在任意 Y 位置都可觸發 hover
+        hoverlabel=dict(
+            bgcolor='rgba(255,255,255,0.95)',
+            bordercolor='rgba(100,100,100,0.3)',
+            font_size=11
+        ),
+        dragmode='zoom',
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin=dict(l=60, r=40, t=60, b=60)
+    )
+    
+    # 設定緊湊的 hover 資訊
+    fig.update_traces(
+        hovertemplate='<b>%{x:.1f}s</b> | %{y:.1f} dB<extra></extra>'
+    )
+    
+    return fig
+
+
+def create_spectrum_with_leq_line(
+    frequencies: np.ndarray,
+    magnitudes: np.ndarray,
+    leq: float,
+    title: str = "頻譜圖",
+    log_scale: bool = True,
+    freq_range: Tuple[float, float] = None,
+    ylabel: str = "幅度 (dB)"
+) -> go.Figure:
+    """建立帶有 Leq 參考線的頻譜圖
+    
+    Args:
+        frequencies: 頻率陣列 (Hz)
+        magnitudes: 能量陣列 (dB)
+        leq: 總 Leq 值
+        title: 圖表標題
+        log_scale: 是否使用對數頻率軸
+        freq_range: 顯示的頻率範圍
+        ylabel: Y 軸標籤
+    
+    Returns:
+        go.Figure: Plotly 圖表物件
+    """
+    fig = go.Figure()
+
+    # 新增頻譜線
+    fig.add_trace(go.Scatter(
+        x=frequencies,
+        y=magnitudes,
+        mode='lines',
+        name='頻譜',
+        line=dict(color='#1f77b4', width=1),
+        hovertemplate='頻率: %{x:.1f} Hz<br>幅度: %{y:.1f} dB<extra></extra>'
+    ))
+    
+    # 添加 Leq 參考線
+    fig.add_hline(
+        y=leq,
+        line=dict(color='#ff7f0e', width=2, dash='dash'),
+        annotation_text=f'Leq: {leq:.1f} dB (總能量)',
+        annotation_position='top right',
+        annotation_font=dict(color='#ff7f0e', size=11)
+    )
+
+    # 設定頻率範圍
+    if freq_range is None:
+        freq_range = (max(20, frequencies[0]), min(20000, frequencies[-1]))
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16, color='#333')),
+        xaxis=dict(
+            title='頻率 (Hz)',
+            type='log' if log_scale else 'linear',
+            range=[np.log10(freq_range[0]), np.log10(freq_range[1])] if log_scale else list(freq_range),
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            tickformat='.0f',
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor',
+            spikecolor='red',
+            spikethickness=1,
+            spikedash='dot'
+        ),
+        yaxis=dict(
+            title=ylabel,
+            showgrid=True,
+            gridcolor='rgba(128, 128, 128, 0.3)',
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor',
+            spikecolor='red',
+            spikethickness=1,
+            spikedash='dot'
+        ),
+        hovermode='closest',
+        dragmode='zoom',
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        margin=dict(l=60, r=40, t=60, b=60)
+    )
+
+    return fig

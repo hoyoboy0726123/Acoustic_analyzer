@@ -23,6 +23,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.config import config
+from core.noise_level import REFERENCE_PRESSURE
 
 
 # 常數定義
@@ -141,20 +142,26 @@ def compute_fft(
     win = get_window(window, len(audio_windowed))
     audio_windowed = audio_windowed * win
 
-    # 使用 scipy.fft.rfft 計算實數訊號的 FFT (只回傳正頻率)
+    # 使用 scipy.fft.rfft 計算實數訊號的 FFT
     fft_result = scipy_fft.rfft(audio_windowed, n=n_fft)
 
     # 計算頻率軸
     frequencies = scipy_fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 
-    # 計算幅度 (取絕對值並正規化)
-    magnitudes = np.abs(fft_result) / n_fft
-
-    # 雙邊轉單邊 (DC 和 Nyquist 不需要乘 2)
-    magnitudes[1:-1] *= 2
-
-    # 轉換為分貝 (dB)
-    magnitudes_db = 20 * np.log10(magnitudes + EPSILON)
+    # --- 修正增益補償 (Standard Scaling for FFT Magnitude) ---
+    # 1. Coherent Gain: 除以 window_sum 來還原正確的振幅
+    # 2. 單邊頻譜補償: 非 DC/Nyquist 分量乘以 sqrt(2) 轉為 RMS
+    # 注意：對於純正弦波可能有約 0.6 dB 的 Scalloping Loss，這是 FFT 離散化的固有特性
+    window_sum = np.sum(win)
+    
+    # 計算幅度
+    magnitudes = np.abs(fft_result) / window_sum
+    
+    # 單邊頻譜 RMS 補償
+    magnitudes[1:-1] *= np.sqrt(2)
+    
+    # 轉換為分貝 (dB SPL relative to 20uPa)
+    magnitudes_db = 20 * np.log10(magnitudes / REFERENCE_PRESSURE + EPSILON)
 
     return frequencies, magnitudes_db
 
@@ -224,15 +231,16 @@ def compute_stft(
             frame = np.zeros(n_fft)
             frame[:n_samples - start] = audio[start:] * win[:n_samples - start]
 
-        # FFT
+        # FFT (RMS 對齊計算)
         fft_result = scipy_fft.rfft(frame, n=n_fft)
-        magnitudes = np.abs(fft_result) / n_fft
-        magnitudes[1:-1] *= 2
+        window_sum = np.sum(win)
+        magnitudes = np.abs(fft_result) / window_sum
+        magnitudes[1:-1] *= np.sqrt(2)
 
         spectrogram[:, i] = magnitudes
 
-    # 轉換為 dB
-    spectrogram_db = 20 * np.log10(spectrogram + EPSILON)
+    # 轉換為分貝 (dB SPL)
+    spectrogram_db = 20 * np.log10(spectrogram / REFERENCE_PRESSURE + EPSILON)
 
     return times, frequencies, spectrogram_db
 
@@ -307,10 +315,10 @@ def compute_average_spectrum(
     )
 
     # 對時間軸取平均
-    # 注意：在 dB 域取平均需要先轉回線性域
-    spectrogram_linear = 10 ** (spectrogram_db / 20)
+    # 注意：在 dB 域計算平均需要先轉回線性域 (Pa)
+    spectrogram_linear = 10 ** (spectrogram_db / 20) * REFERENCE_PRESSURE
     avg_magnitudes_linear = np.mean(spectrogram_linear, axis=1)
-    avg_magnitudes_db = 20 * np.log10(avg_magnitudes_linear + EPSILON)
+    avg_magnitudes_db = 20 * np.log10(avg_magnitudes_linear / REFERENCE_PRESSURE + EPSILON)
 
     return frequencies, avg_magnitudes_db
 
@@ -363,8 +371,8 @@ def compute_psd(
     # 歸一化到 1 Hz 頻寬 (PSD = Power / Δf)
     psd = avg_power / freq_resolution
     
-    # 轉為 dB
-    psd_db = 10 * np.log10(psd + EPSILON)
+    # 轉為 dB (dB/Hz relative to Pref^2)
+    psd_db = 10 * np.log10(psd / (REFERENCE_PRESSURE ** 2) + EPSILON)
     
     return frequencies, psd_db
 

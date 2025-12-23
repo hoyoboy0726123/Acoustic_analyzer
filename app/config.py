@@ -122,7 +122,7 @@ class AudioFileConfig:
 
 @dataclass(frozen=True)
 class DiscreteToneThreshold:
-    """Discrete Tone 判定門檻 (ECMA-74)
+    """Discrete Tone 判定門檻 (ECMA-418-1)
 
     Attributes:
         freq_range: 頻率範圍 (Hz)
@@ -134,7 +134,9 @@ class DiscreteToneThreshold:
 
 @dataclass
 class DiscreteToneConfig:
-    """Discrete Tone 檢測配置 (依據 ECMA-74 Annex D)"""
+    """Discrete Tone 檢測配置 (依據 ECMA-418-1)"""
+    # ECMA-418-1 使用 PR/TNR 方法，門檻由頻率公式動態計算
+    # 此處保留頻帶劃分供參考用途
     thresholds: List[DiscreteToneThreshold] = field(default_factory=lambda: [
         DiscreteToneThreshold(freq_range=(89.1, 282), prominence_threshold=8.0),
         DiscreteToneThreshold(freq_range=(282, 893), prominence_threshold=5.0),

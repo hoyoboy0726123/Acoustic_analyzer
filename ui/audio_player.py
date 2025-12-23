@@ -22,7 +22,10 @@ def create_audio_player_with_spectrogram(
     title: str = "🎵 同步音訊播放器",
     fmax: int = 20000,
     n_fft: int = 2048,
-    hop_length: int = 512
+    hop_length: int = 512,
+    calibration_offset: float = 0.0,
+    use_a_weighting: bool = True,
+    spl_offset: float = 0.0
 ) -> None:
     """建立帶有互動式 Spectrogram 和進度線的音訊播放器
     
@@ -43,28 +46,44 @@ def create_audio_player_with_spectrogram(
         fmax: 最大顯示頻率 (Hz)，預設 20000
         n_fft: FFT 視窗大小，預設 2048
         hop_length: 跳躍長度，預設 512
+        calibration_offset: 麥克風校準偏移 (dB)
+        use_a_weighting: 是否套用 A-weighting
+        spl_offset: dB SPL 模式偏移 (dB)
     """
     from scipy.signal import spectrogram as scipy_spectrogram
+    from core.noise_level import apply_a_weighting
     
-    # 將音訊轉換為 base64
+    # 將音訊轉換為 base64 (使用原始音訊，不影響播放)
     audio_buffer = io.BytesIO()
     sf.write(audio_buffer, audio, sample_rate, format='WAV')
     audio_buffer.seek(0)
     audio_base64 = base64.b64encode(audio_buffer.read()).decode()
     
+    # 如果啟用 A-weighting，對音訊進行加權
+    if use_a_weighting:
+        audio_for_spec = apply_a_weighting(audio, sample_rate)
+    else:
+        audio_for_spec = audio
+    
     # 計算 Spectrogram (與 create_spectrogram_chart 完全相同的參數)
     frequencies, times, Sxx = scipy_spectrogram(
-        audio, fs=sample_rate,
+        audio_for_spec, fs=sample_rate,
         nperseg=n_fft, noverlap=n_fft - hop_length
     )
     
-    # 轉換為 dB
-    Sxx_db = 10 * np.log10(Sxx + 1e-10)
+    # 轉換為 dB 並套用校準偏移（麥克風校準 + SPL 偏移）
+    total_offset = calibration_offset + spl_offset
+    Sxx_db = 10 * np.log10(Sxx + 1e-10) + total_offset
     
     # 限制頻率範圍 (與 create_spectrogram_chart 完全相同)
     freq_mask = frequencies <= min(fmax, sample_rate / 2)
     frequencies = frequencies[freq_mask]
     Sxx_db = Sxx_db[freq_mask, :]
+    
+    # 動態單位標籤
+    unit_label = "dB(A)" if use_a_weighting else "dB"
+    if spl_offset > 0:
+        unit_label += " SPL"
     
     # 音訊長度
     duration = len(audio) / sample_rate
@@ -174,11 +193,11 @@ def create_audio_player_with_spectrogram(
                 type: 'heatmap',
                 colorscale: 'Viridis',
                 colorbar: {{
-                    title: {{ text: 'dB', side: 'right' }},
+                    title: {{ text: '{unit_label}', side: 'right' }},
                     thickness: 15,
                     len: 0.9
                 }},
-                hovertemplate: '時間: %{{x:.2f}}s<br>頻率: %{{y:.0f}} Hz<br>幅度: %{{z:.1f}} dB<extra></extra>'
+                hovertemplate: '時間: %{{x:.2f}}s<br>頻率: %{{y:.0f}} Hz<br>幅度: %{{z:.1f}} {unit_label}<extra></extra>'
             }};
             
             // 進度線 (初始位置)
