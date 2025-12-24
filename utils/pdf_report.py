@@ -124,6 +124,18 @@ def create_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         leading=16
     )
     
+    # 正文置中樣式 (用於表格內的數值居中)
+    body_center_style = ParagraphStyle(
+        'BodyCenter',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=11,
+        textColor=colors.HexColor('#333333'),
+        spaceAfter=0,
+        leading=16,
+        alignment=1  # 置中
+    )
+    
     # PASS 樣式
     pass_style = ParagraphStyle(
         'Pass',
@@ -158,12 +170,35 @@ def create_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         alignment=1
     )
     
+    # 表格內 PASS 樣式（小字體）
+    pass_small_style = ParagraphStyle(
+        'PassSmall',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=11,
+        textColor=colors.HexColor('#27ae60'),  # 綠色
+        alignment=0  # 左對齊
+    )
+    
+    # 表格內 FAIL 樣式（小字體）
+    fail_small_style = ParagraphStyle(
+        'FailSmall',
+        parent=styles['Normal'],
+        fontName=font_name,
+        fontSize=11,
+        textColor=colors.HexColor('#e74c3c'),  # 紅色
+        alignment=0  # 左對齊
+    )
+    
     return {
         'title': title_style,
         'subtitle': subtitle_style,
         'body': body_style,
+        'body_center': body_center_style,
         'pass': pass_style,
         'fail': fail_style,
+        'pass_small': pass_small_style,
+        'fail_small': fail_small_style,
         'table_header': table_header_style
     }
 
@@ -175,7 +210,15 @@ def generate_pdf_report(
     sop_params: dict = None,
     analyze_discrete_tone_flag: bool = True,
     calibration_offset: float = 0.0,
-    leq_settings: dict = None
+    leq_settings: dict = None,
+    use_a_weighting: bool = True,
+    spectrum_mode: str = 'average',
+    window_function: str = 'hann',
+    n_fft: int = 8192,
+    fft_chart: go.Figure = None,  # 直接從 UI 傳入的 FFT 圖表
+    level_time_chart: go.Figure = None,  # 直接從 UI 傳入的 Level vs Time 圖表
+    octave_chart: go.Figure = None,  # 直接從 UI 傳入的 1/3 Octave 圖表
+    ecma_standard: str = 'ECMA-74'  # Discrete Tone 判定標準
 ) -> Tuple[Optional[bytes], Optional[str]]:
     """生成 PDF 測試報告
     
@@ -278,20 +321,20 @@ def generate_pdf_report(
             
             leq_val = noise_metrics['leq_dba'] + calibration_offset
             leq_fail = leq_val > leq_spec
-            leq_status = "FAIL" if leq_fail else "PASS"
+            leq_status = Paragraph("FAIL", styles['fail_small']) if leq_fail else Paragraph("PASS", styles['pass_small'])
             info_data.append([f"{leq_tag}", leq_status])
         
         # 添加 Discrete Tone 結果（如果有分析）
         if analyze_discrete_tone_flag and discrete_tone_result:
             tone_detected = discrete_tone_result.get('tone_detected', False)
-            tone_status = "FAIL" if tone_detected else "PASS"
+            tone_status = Paragraph("FAIL", styles['fail_small']) if tone_detected else Paragraph("PASS", styles['pass_small'])
             info_data.append(["Discrete Tone", tone_status])
         
         # 添加 SOW 結果（如果有分析）- 支援多模式
         if sop_params and sop_results:
             for mode_name, mode_result in sop_results.items():
                 sow_pass = mode_result.get('is_pass', True)
-                sow_status = "PASS" if sow_pass else "FAIL"
+                sow_status = Paragraph("PASS", styles['pass_small']) if sow_pass else Paragraph("FAIL", styles['fail_small'])
                 info_data.append([f"SOW ({mode_name})", sow_status])
         
         info_table = Table(info_data, colWidths=[5*cm, 10*cm])
@@ -323,7 +366,7 @@ def generate_pdf_report(
         
         metrics_data = [
             ["指標", "數值", "說明"],
-            [Paragraph("<b>Leq</b>", styles['body']), Paragraph(f"<b><font color='#2980b9' size='14'>{leq:.1f} dB(A)</font></b>", styles['body']), "等效連續音壓級"],
+            [Paragraph("<b>Leq</b>", styles['body_center']), Paragraph(f"<b><font color='#2980b9' size='14'>{leq:.1f} dB(A)</font></b>", styles['body_center']), "等效連續音壓級"],
             ["Lmax", f"{lmax:.1f} dB(A)", "最大音壓級"],
             ["Lmin", f"{lmin:.1f} dB(A)", "最小音壓級"],
             ["L10", f"{l10:.1f} dB(A)", "超過 10% 時間的音壓級"],
@@ -345,10 +388,11 @@ def generate_pdf_report(
             ('BACKGROUND', (0, 1), (-1, 1), colors.HexColor('#eaf2f8')),
             ('TEXTCOLOR', (0, 1), (-1, 1), colors.black),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('ALIGN', (2, 1), (2, -1), 'LEFT'), # Keep original alignment for description column
-            ('FONTSIZE', (0, 1), (-1, -1), 10), # Apply default font size to body rows
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 8), # Apply default padding to body rows
-            ('TOPPADDING', (0, 1), (-1, -1), 8), # Apply default padding to body rows
+            # 所有說明欄位（包含 Leq）靠左
+            ('ALIGN', (2, 1), (2, -1), 'LEFT'), 
+            ('FONTSIZE', (0, 2), (-1, -1), 10), 
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8), 
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
         ]))
         story.append(metrics_table)
         
@@ -359,32 +403,46 @@ def generate_pdf_report(
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
         story.append(Spacer(1, 0.5*cm))
         
-        # 計算頻譜
-        frequencies, magnitudes = compute_average_spectrum(audio_data, sample_rate)
-        magnitudes_weighted = apply_a_weighting(frequencies, magnitudes)
-        magnitudes_calibrated = magnitudes_weighted + calibration_offset
-        
-        # 限制頻率範圍
-        mask = (frequencies >= 20) & (frequencies <= 20000)
-        freq_plot = frequencies[mask]
-        mag_plot = magnitudes_calibrated[mask]
-        
-        # 創建頻譜圖
-        fig_spectrum = go.Figure()
-        fig_spectrum.add_trace(go.Scatter(
-            x=freq_plot,
-            y=mag_plot,
-            mode='lines',
-            line=dict(color='#1f77b4', width=1),
-            name='FFT Spectrum'
-        ))
-        fig_spectrum.update_layout(
-            title='FFT 平均頻譜圖 (A-weighted)',
-            xaxis=dict(title='頻率 (Hz)', type='log', range=[np.log10(20), np.log10(20000)]),
-            yaxis=dict(title='幅度 dB(A)'),
-            template='plotly_white',
-            margin=dict(l=60, r=40, t=60, b=60)
-        )
+        # 優先使用 UI 傳入的圖表（確保與前端完全一致）
+        if fft_chart is not None:
+            fig_spectrum = fft_chart
+        else:
+            # 備用方案：重新計算（不建議，可能與 UI 不一致）
+            from core.fft import compute_spectrum_with_mode
+            frequencies, magnitudes, unit = compute_spectrum_with_mode(
+                audio_data, sample_rate, mode=spectrum_mode, n_fft=n_fft, window=window_function
+            )
+            
+            if use_a_weighting:
+                magnitudes_final = apply_a_weighting(frequencies, magnitudes)
+                weight_label = "A-weighted"
+                ylabel = "幅度 dB(A)"
+            else:
+                magnitudes_final = magnitudes
+                weight_label = "Z-weighted (Flat)"
+                ylabel = "幅度 dB"
+            
+            magnitudes_calibrated = magnitudes_final + calibration_offset
+            
+            mask = (frequencies >= 20) & (frequencies <= 20000)
+            freq_plot = frequencies[mask]
+            mag_plot = magnitudes_calibrated[mask]
+            
+            fig_spectrum = go.Figure()
+            fig_spectrum.add_trace(go.Scatter(
+                x=freq_plot,
+                y=mag_plot,
+                mode='lines',
+                line=dict(color='#1f77b4', width=1),
+                name='FFT Spectrum'
+            ))
+            fig_spectrum.update_layout(
+                title=f'FFT 平均頻譜圖 ({weight_label})',
+                xaxis=dict(title='頻率 (Hz)', type='log', range=[np.log10(20), np.log10(20000)]),
+                yaxis=dict(title=ylabel),
+                template='plotly_white',
+                margin=dict(l=60, r=40, t=60, b=60)
+            )
         
         # 導出圖片
         spectrum_img = export_plotly_to_image(fig_spectrum, width=800, height=350)
@@ -400,33 +458,42 @@ def generate_pdf_report(
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
         story.append(Spacer(1, 0.5*cm))
         
-        # 取得時間剖面
-        profile = noise_metrics.get("profile", {})
-        if profile:
-            times = profile.get("times", [])
-            levels = [l + calibration_offset for l in profile.get("levels", [])]
-            
-            fig_level = go.Figure()
-            fig_level.add_trace(go.Scatter(
-                x=times,
-                y=levels,
-                mode='lines',
-                line=dict(color='#2ecc71', width=1),
-                name='Level'
-            ))
-            fig_level.update_layout(
-                title='Level vs Time',
-                xaxis=dict(title='時間 (秒)'),
-                yaxis=dict(title='L(A) dB(SPL)'),
-                template='plotly_white',
-                margin=dict(l=60, r=40, t=60, b=60)
-            )
-            
+        # 優先使用 UI 傳入的圖表
+        if level_time_chart is not None:
+            fig_level = level_time_chart
             level_img = export_plotly_to_image(fig_level, width=800, height=300)
             if level_img:
                 story.append(Image(io.BytesIO(level_img), width=16*cm, height=6*cm))
             else:
                 story.append(Paragraph("⚠️ 圖表導出失敗", styles['body']))
+        else:
+            # 備用方案：使用 noise_metrics 中的資料
+            profile = noise_metrics.get("profile", {})
+            if profile:
+                times = profile.get("times", [])
+                levels = [l + calibration_offset for l in profile.get("levels", [])]
+                
+                fig_level = go.Figure()
+                fig_level.add_trace(go.Scatter(
+                    x=times,
+                    y=levels,
+                    mode='lines',
+                    line=dict(color='#2ecc71', width=1),
+                    name='Level'
+                ))
+                fig_level.update_layout(
+                    title='Level vs Time',
+                    xaxis=dict(title='時間 (秒)'),
+                    yaxis=dict(title='L(A) dB(SPL)'),
+                    template='plotly_white',
+                    margin=dict(l=60, r=40, t=60, b=60)
+                )
+                
+                level_img = export_plotly_to_image(fig_level, width=800, height=300)
+                if level_img:
+                    story.append(Image(io.BytesIO(level_img), width=16*cm, height=6*cm))
+                else:
+                    story.append(Paragraph("⚠️ 圖表導出失敗", styles['body']))
         
         story.append(Spacer(1, 1*cm))
         
@@ -435,14 +502,18 @@ def generate_pdf_report(
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
         story.append(Spacer(1, 0.5*cm))
         
-        # 使用與前端相同的圖表生成函數（確保計算方法一致）
-        fig_octave = create_octave_band_chart(audio_data, sample_rate, use_a_weighting=True, calibration_offset=calibration_offset)
-        # 調整圖表外觀以適應 PDF
-        fig_octave.update_layout(
-            title='1/3 倍頻程頻譜 (A-weighted)',
-            template='plotly_white',
-            margin=dict(l=60, r=40, t=60, b=60)
-        )
+        # 優先使用 UI 傳入的圖表
+        if octave_chart is not None:
+            fig_octave = octave_chart
+        else:
+            # 備用方案：重新計算
+            fig_octave = create_octave_band_chart(audio_data, sample_rate, use_a_weighting=True, calibration_offset=calibration_offset)
+            # 調整圖表外觀以適應 PDF
+            fig_octave.update_layout(
+                title='1/3 倍頻程頻譜 (A-weighted)',
+                template='plotly_white',
+                margin=dict(l=60, r=40, t=60, b=60)
+            )
         
         octave_img = export_plotly_to_image(fig_octave, width=800, height=300)
         if octave_img:
@@ -454,11 +525,18 @@ def generate_pdf_report(
         
         # ===== 6. Discrete Tone 分析 =====
         if analyze_discrete_tone_flag:
-            story.append(Paragraph("Discrete Tone 檢測 (ECMA-418-1)", styles['subtitle']))
+            story.append(Paragraph(f"Discrete Tone 檢測 ({ecma_standard})", styles['subtitle']))
             story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
             story.append(Spacer(1, 0.5*cm))
             
-            tone_result = detect_discrete_tones(audio_data, sample_rate)
+            tone_result = detect_discrete_tones(
+                audio_data, sample_rate,
+                ecma_standard=ecma_standard,
+                spectrum_mode=spectrum_mode,
+                window_function=window_function,
+                n_fft=n_fft,
+                use_a_weighting=use_a_weighting
+            )
             
             if tone_result['tone_detected']:
                 story.append(Paragraph(

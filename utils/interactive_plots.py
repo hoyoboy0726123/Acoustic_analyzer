@@ -98,7 +98,8 @@ def create_interactive_spectrum(
             range=[y_axis_min, y_axis_max],
             showgrid=show_grid,
             gridcolor='rgba(128, 128, 128, 0.3)',
-            showspikes=False  # 不需要 Y 軸 spike
+            showspikes=False,  # 不需要 Y 軸 spike
+            zeroline=False  # 移除 0 dB 參考線
         ),
         hovermode='x',  # 在任意 Y 位置都可觸發 hover
         dragmode='zoom',
@@ -1442,7 +1443,18 @@ def create_combined_analysis_chart(
         row=1, col=1,
         matches='x3'  # 與 Spectrogram (Row 2, Col 1) 共用 X 軸縮放
     )
-    fig.update_yaxes(title_text='音壓級 (dBA)', row=1, col=1, fixedrange=False)
+    
+    # 計算 Level vs Time 的 Y 軸範圍 (自動置中)
+    if len(levels_lv) > 0:
+        y_lv_min = np.min(levels_lv)
+        y_lv_max = np.max(levels_lv)
+        # 確保有足夠的邊距 (至少上下 2dB)
+        margin = max((y_lv_max - y_lv_min) * 0.5, 3) 
+        y_range = [y_lv_min - margin, y_lv_max + margin]
+    else:
+        y_range = None
+
+    fig.update_yaxes(title_text='音壓級 (dBA)', row=1, col=1, fixedrange=False, range=y_range)
     
     # 2. FFT 頻譜 (Row 1, Col 2)
     fig.update_xaxes(

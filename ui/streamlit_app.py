@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-聲學測試 AI 分析系統 - Streamlit Web UI
+聲學測試分析系統 - Streamlit Web UI
 
 功能 (AUD-009):
 - 檔案上傳介面
@@ -25,7 +25,7 @@ from utils.pdf_report import generate_pdf_report
 def main():
     """Streamlit 應用程式主函數"""
     st.set_page_config(
-        page_title="聲學測試 AI 分析系統",
+        page_title="聲學測試分析系統",
         page_icon="🔊",
         layout="wide"
     )
@@ -40,8 +40,8 @@ def main():
     if 'validation' not in st.session_state:
         st.session_state.validation = None
 
-    st.title("🔊 聲學測試 AI 分析系統")
-    st.markdown("*基於 AI 的筆記型電腦聲學測試分析系統*")
+    st.title("🔊 聲學測試分析系統")
+    st.markdown("*專業級筆記型電腦聲學測試分析系統*")
     st.markdown("---")
 
     # 側邊欄設定
@@ -338,14 +338,27 @@ def main():
             with col2:
                 if st.button("📑 PDF 報告", key="btn_gen_pdf", use_container_width=True):
                     with st.spinner("正在生成 PDF 報告（含圖表）..."):
-                        pdf_data, error = generate_pdf_report(
+                        # 強制重新載入 pdf_report 模組，確保使用最新代碼
+                        import importlib
+                        import utils.pdf_report as pdf_report_module
+                        importlib.reload(pdf_report_module)
+                        
+                        pdf_data, error = pdf_report_module.generate_pdf_report(
                             st.session_state.audio_original,
                             st.session_state.sr,
                             filename=st.session_state.get('audio_filename', "audio.wav"),
                             sop_params=sop_params if analyze_sop else None,
                             analyze_discrete_tone_flag=analyze_discrete_tone,
                             calibration_offset=calibration_offset,
-                            leq_settings=leq_settings
+                            leq_settings=leq_settings,
+                            use_a_weighting=use_a_weighting,
+                            spectrum_mode=spectrum_mode,
+                            window_function=window_function,
+                            n_fft=n_fft,
+                            fft_chart=st.session_state.get('fft_chart_figure', None),
+                            level_time_chart=st.session_state.get('level_time_chart_figure', None),
+                            octave_chart=st.session_state.get('octave_chart_figure', None),
+                            ecma_standard=ecma_standard
                         )
                         
                         if error:
@@ -836,22 +849,8 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True,
         weight_label = unit
     
     # 套用校準偏移
-    # cal_offset 已經從外部傳入了 (雖然變數名叫 calibration_offset)
-    # 不過為了保險，還是從 session 抓最新的，或者直接用傳入的參數
-    # 這裡我們統一使用傳入的參數 calibration_offset
     magnitudes_db = magnitudes_db + calibration_offset
     cal_offset = calibration_offset
-    
-    # 根據高通濾波設定裁切 FFT 數據
-    # 修正：不物理移除數據，改用 Viewport 縮放，以保留濾波器衰減斜率的可視性
-    # if highpass_cutoff > 20:
-    #     mask = frequencies >= highpass_cutoff
-    #     frequencies = frequencies[mask]
-    #     magnitudes_db = magnitudes_db[mask]
-    
-    # 計算 Leq 用於參考
-    # noise_result = calculate_noise_level(audio, sr)
-    # leq = noise_result['leq_dba'] + cal_offset
     
     st.subheader(f"📈 頻譜分析 [{mode_label}] - {weight_label}")
     st.caption(f"💡 模式: {mode_label} | 窗函數: {window_function.capitalize()} | 頻率解析度: {freq_resolution:.2f} Hz")
@@ -874,11 +873,14 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True,
         # 互動式頻譜圖
         fig = create_interactive_spectrum(
             frequencies, magnitudes_db,
-            title=f"頻譜分析 [{mode_label}] - {unit} (Res: {freq_resolution:.1f}Hz)",
+            title=f"頻譜分析 [{mode_label}] - {weight_label} (Res: {freq_resolution:.1f}Hz)",
             ylabel=f"幅度 ({weight_label})",
             freq_range=(x_min, 20000)
         )
         st.plotly_chart(fig, use_container_width=True, key=f"spectrum_main_{highpass_cutoff}_{key_suffix}")
+        
+        # 保存 FFT 圖表到 session_state，供 PDF 報告使用
+        st.session_state['fft_chart_figure'] = fig
         
         st.caption(f"ℹ️ 設定參數: Window={window_function}, N_FFT={n_fft}, Mode={spectrum_mode}")
 
@@ -887,6 +889,9 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True,
         # 使用 audio_processed 以反映濾波效果
         level_time_fig = create_level_vs_time_chart(audio, sr, smooth_window=smooth_window, calibration_offset=cal_offset, use_a_weighting=use_a_weighting)
         st.plotly_chart(level_time_fig, use_container_width=True, key="level_vs_time")
+        
+        # 保存 Level vs Time 圖表到 session_state，供 PDF 報告使用
+        st.session_state['level_time_chart_figure'] = level_time_fig
     
     with tab3:
         # 波形圖
@@ -912,6 +917,9 @@ def run_spectrum_analysis(audio, sr, use_a_weighting=True,
             calibration_offset=cal_offset
         )
         st.plotly_chart(octave_fig, use_container_width=True, key="octave_main")
+        
+        # 保存 1/3 Octave 圖表到 session_state，供 PDF 報告使用
+        st.session_state['octave_chart_figure'] = octave_fig
         
     with tab6:
         # 3D Waterfall
