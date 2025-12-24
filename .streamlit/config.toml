@@ -1,0 +1,2 @@
+[server]
+maxMessageSize = 2000  # 設定為 2000 MB (預設 200 MB)

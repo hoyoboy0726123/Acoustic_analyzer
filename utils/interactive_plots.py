@@ -901,21 +901,33 @@ def create_spectrogram_chart(
     from scipy.signal import spectrogram as scipy_spectrogram
     from core.noise_level import apply_a_weighting
 
+    # === 長音訊優化（只對超過 10 分鐘的音訊）===
+    TEN_MINUTES_SAMPLES = sample_rate * 600  # 10 分鐘
+    MAX_TIME_BINS = 2000  # 時間軸最多 2000 個點
+    MAX_FREQ_BINS = 500   # 頻率軸最多 500 個點
     
-    # 如果啟用 A-weighting，先對音訊套用
+    audio_len = len(audio)
+    
+    # 對長音訊增加 hop_length 以減少幀數（保留完整頻率範圍）
+    effective_hop = hop_length
+    if audio_len > TEN_MINUTES_SAMPLES:
+        # 計算需要的 hop_length 以限制幀數
+        target_frames = MAX_TIME_BINS
+        effective_hop = max(hop_length, audio_len // target_frames)
+    
+    # 套用 A-weighting
     if use_a_weighting:
         audio_processed = apply_a_weighting(audio, sample_rate)
     else:
         audio_processed = audio
-    
-    # 計算 Spectrogram
+        
+    # 計算 Spectrogram（使用原始 sample_rate）
     frequencies, times, Sxx = scipy_spectrogram(
         audio_processed, fs=sample_rate,
-        nperseg=n_fft, noverlap=n_fft - hop_length
+        nperseg=n_fft, noverlap=max(0, n_fft - effective_hop)
     )
     
     # 轉換為 dB (相對功率)
-    # 使用 10*log10 因為 Sxx 是功率譜密度
     Sxx_db = 10 * np.log10(Sxx + 1e-10)
     
     # 套用校準偏移（麥克風校準 + SPL 模式偏移）
@@ -926,6 +938,18 @@ def create_spectrogram_chart(
     freq_mask = frequencies <= min(fmax, sample_rate / 2)
     frequencies = frequencies[freq_mask]
     Sxx_db = Sxx_db[freq_mask, :]
+    
+    # === 矩陣降採樣（只對超過 10 分鐘的音訊額外處理）===
+    if audio_len > TEN_MINUTES_SAMPLES:
+        if Sxx_db.shape[1] > MAX_TIME_BINS:
+            time_step = Sxx_db.shape[1] // MAX_TIME_BINS
+            Sxx_db = Sxx_db[:, ::time_step]
+            times = times[::time_step]
+        
+        if Sxx_db.shape[0] > MAX_FREQ_BINS:
+            freq_step = Sxx_db.shape[0] // MAX_FREQ_BINS
+            Sxx_db = Sxx_db[::freq_step, :]
+            frequencies = frequencies[::freq_step]
     
     # 動態單位標籤
     unit_label = "dB(A)" if use_a_weighting else "dB"
@@ -1198,16 +1222,28 @@ def create_waterfall_3d_chart(
     from scipy.signal import spectrogram as scipy_spectrogram
     from core.noise_level import apply_a_weighting
     
-    # 如果啟用 A-weighting，先對音訊套用
+    # === 長音訊優化（只對超過 10 分鐘的音訊）===
+    TEN_MINUTES_SAMPLES = sample_rate * 600  # 10 分鐘
+    MAX_TIME_BINS = 2000
+    
+    audio_len = len(audio)
+    
+    # 對長音訊增加 hop_length
+    effective_hop = hop_length
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = MAX_TIME_BINS
+        effective_hop = max(hop_length, audio_len // target_frames)
+    
+    # 套用 A-weighting
     if use_a_weighting:
         audio_processed = apply_a_weighting(audio, sample_rate)
     else:
         audio_processed = audio
-    
-    # 計算 Spectrogram
+        
+    # 計算 Spectrogram（使用原始 sample_rate）
     frequencies, times, Sxx = scipy_spectrogram(
         audio_processed, fs=sample_rate,
-        nperseg=n_fft, noverlap=n_fft - hop_length
+        nperseg=n_fft, noverlap=max(0, n_fft - effective_hop)
     )
     
     # 轉換為 dB
@@ -1361,18 +1397,33 @@ def create_combined_analysis_chart(
     )
 
     # 3. Spectrogram (需套用 calibration_offset + spl_offset)
+    # === 長音訊優化 ===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    MAX_TIME_BINS = 2000
+    
+    # 使用與 create_spectrogram_chart 相同的參數
+    n_fft = 2048
+    hop_length = 512
+    
+    # 對長音訊增加 hop_length
+    effective_hop = hop_length
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = MAX_TIME_BINS
+        effective_hop = max(hop_length, audio_len // target_frames)
+    
     # 如果啟用 A-weighting，先對音訊套用
     if use_a_weighting:
         audio_spec = apply_a_wt(audio, sample_rate)
     else:
         audio_spec = audio
 
-    # 使用與 create_spectrogram_chart 相同的參數
-    n_fft = 2048
-    hop_length = 512
+    # 計算 Spectrogram（使用原始 sample_rate）
     freq_spec, times_spec, Sxx = scipy_spectrogram(
-        audio_spec, fs=sample_rate, nperseg=n_fft, noverlap=n_fft - hop_length
+        audio_spec, fs=sample_rate, 
+        nperseg=n_fft, noverlap=max(0, n_fft - effective_hop)
     )
+    
     Sxx_db = 10 * np.log10(Sxx + 1e-10)
     
     # 套用偏移

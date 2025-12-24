@@ -1,0 +1,16 @@
+{
+  "calibration_offset": 9.0,
+  "spectrogram_offset": 110.0,
+  "use_a_weighting": true,
+  "spectrum_mode": "average",
+  "window_function": "hann",
+  "n_fft": 8192,
+  "ecma_standard": "ECMA-74",
+  "analyze_noise": true,
+  "analyze_spectrum": true,
+  "analyze_discrete_tone": true,
+  "analyze_sop": true,
+  "analyze_band_filter": false,
+  "highpass_cutoff": 20,
+  "smooth_window_size": 1
+}

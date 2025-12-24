@@ -309,7 +309,19 @@ def compute_average_spectrum(
         >>> plt.xlabel('Frequency (Hz)')
         >>> plt.ylabel('Magnitude (dB)')
     """
-    # 計算 STFT
+    # === 長音訊優化（超過 10 分鐘）- 增加 hop_length 減少幀數 ===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    
+    if hop_length is None:
+        hop_length = config.fft.hop_length
+    
+    if audio_len > TEN_MINUTES_SAMPLES:
+        # 計算需要的 hop_length 以限制幀數到約 2000 幀
+        target_frames = 2000
+        hop_length = max(hop_length, audio_len // target_frames)
+    
+    # 計算 STFT（使用原始 sample_rate 保留完整頻率範圍）
     times, frequencies, spectrogram_db = compute_stft(
         audio, sample_rate, n_fft, hop_length, window
     )
@@ -351,7 +363,18 @@ def compute_psd(
     if n_fft is None:
         n_fft = config.fft.n_fft
     
-    # 計算 STFT
+    # === 長音訊優化（超過 10 分鐘）- 增加 hop_length ===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    
+    if hop_length is None:
+        hop_length = config.fft.hop_length
+    
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = 2000
+        hop_length = max(hop_length, audio_len // target_frames)
+    
+    # 計算 STFT（使用原始 sample_rate）
     times, frequencies, spectrogram_db = compute_stft(
         audio, sample_rate, n_fft, hop_length, window
     )
@@ -401,7 +424,18 @@ def compute_peak_hold_spectrum(
             - frequencies: 頻率陣列 (Hz)
             - peak_magnitudes_db: 峰值能量陣列 (dB)
     """
-    # 計算 STFT
+    # === 長音訊優化（超過 10 分鐘）- 增加 hop_length ===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    
+    if hop_length is None:
+        hop_length = config.fft.hop_length
+    
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = 2000
+        hop_length = max(hop_length, audio_len // target_frames)
+    
+    # 計算 STFT（使用原始 sample_rate）
     times, frequencies, spectrogram_db = compute_stft(
         audio, sample_rate, n_fft, hop_length, window
     )

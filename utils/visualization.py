@@ -116,9 +116,21 @@ def plot_spectrogram(
     if cmap is None:
         cmap = config.visualization.cmap
 
-    # 計算 STFT
+    # === 長音訊優化（超過 10 分鐘）- 增加 hop_length ===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    
+    # 動態調整 hop_length
+    hop_length = config.fft.hop_length
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = 2000
+        hop_length = max(hop_length, audio_len // target_frames)
+
+    # 計算 STFT（使用原始 sample_rate 保留完整頻率範圍）
     from core.fft import compute_stft
-    times, frequencies, spectrogram_db = compute_stft(audio, sample_rate)
+    times, frequencies, spectrogram_db = compute_stft(
+        audio, sample_rate, hop_length=hop_length
+    )
 
     # 限制頻率範圍
     freq_mask = frequencies <= fmax

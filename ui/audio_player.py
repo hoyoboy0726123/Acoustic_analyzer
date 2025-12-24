@@ -59,23 +59,34 @@ def create_audio_player_with_spectrogram(
     audio_buffer.seek(0)
     audio_base64 = base64.b64encode(audio_buffer.read()).decode()
     
+    # === 長音訊優化（超過 10 分鐘）===
+    TEN_MINUTES_SAMPLES = sample_rate * 600
+    audio_len = len(audio)
+    MAX_TIME_BINS = 2000
+    
+    # 對長音訊增加 hop_length
+    effective_hop = hop_length
+    if audio_len > TEN_MINUTES_SAMPLES:
+        target_frames = MAX_TIME_BINS
+        effective_hop = max(hop_length, audio_len // target_frames)
+    
     # 如果啟用 A-weighting，對音訊進行加權
     if use_a_weighting:
         audio_for_spec = apply_a_weighting(audio, sample_rate)
     else:
         audio_for_spec = audio
     
-    # 計算 Spectrogram (與 create_spectrogram_chart 完全相同的參數)
+    # 計算 Spectrogram（使用原始 sample_rate）
     frequencies, times, Sxx = scipy_spectrogram(
         audio_for_spec, fs=sample_rate,
-        nperseg=n_fft, noverlap=n_fft - hop_length
+        nperseg=n_fft, noverlap=max(0, n_fft - effective_hop)
     )
     
     # 轉換為 dB 並套用校準偏移（麥克風校準 + SPL 偏移）
     total_offset = calibration_offset + spl_offset
     Sxx_db = 10 * np.log10(Sxx + 1e-10) + total_offset
     
-    # 限制頻率範圍 (與 create_spectrogram_chart 完全相同)
+    # 限制頻率範圍
     freq_mask = frequencies <= min(fmax, sample_rate / 2)
     frequencies = frequencies[freq_mask]
     Sxx_db = Sxx_db[freq_mask, :]
